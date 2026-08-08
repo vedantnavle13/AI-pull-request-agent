@@ -9,9 +9,7 @@ def extract_diff(files):
             "status": file["status"],
             "additions": file["additions"],
             "deletions": file["deletions"],
-            "patch": file.get("patch", "")
+            "patch": file.get("patch", ""),
         })
 
     return changes
-
-    changes = extract_diff(files)

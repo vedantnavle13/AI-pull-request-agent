@@ -4,6 +4,7 @@ import requests
 class GitHubClient:
 
     def __init__(self, token: str):
+
         self.headers = {
             "Authorization": f"Bearer {token}",
             "Accept": "application/vnd.github+json",
@@ -13,8 +14,9 @@ class GitHubClient:
         self,
         owner: str,
         repo: str,
-        pr_number: int
+        pr_number: int,
     ):
+
         url = (
             f"https://api.github.com/repos/"
             f"{owner}/{repo}/pulls/{pr_number}/files"
@@ -22,7 +24,40 @@ class GitHubClient:
 
         response = requests.get(
             url,
-            headers=self.headers
+            headers=self.headers,
+        )
+
+        response.raise_for_status()
+        data = response.json()
+        print("GitHub status:", response.status_code)
+        print("GitHub response type:", type(data))
+        print("GitHub response:", data)
+        return data
+        
+
+    def create_pull_request_review(
+        self,
+        owner: str,
+        repo: str,
+        pr_number: int,
+        body: str,
+        event: str = "COMMENT",
+    ):
+
+        url = (
+            f"https://api.github.com/repos/"
+            f"{owner}/{repo}/pulls/{pr_number}/reviews"
+        )
+
+        payload = {
+            "body": body,
+            "event": event,
+        }
+
+        response = requests.post(
+            url,
+            headers=self.headers,
+            json=payload,
         )
 
         response.raise_for_status()
