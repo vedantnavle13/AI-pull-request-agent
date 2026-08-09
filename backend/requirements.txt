@@ -6,3 +6,4 @@ python-dotenv>=1.0.0
 httpx>=0.24.0
 PyJWT[crypto]
 requests
+psycopg[binary]
