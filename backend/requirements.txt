@@ -7,3 +7,6 @@ httpx>=0.24.0
 PyJWT[crypto]
 requests
 psycopg[binary]
+arq
+redis
+psycopg2-binary

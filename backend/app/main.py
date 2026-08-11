@@ -1,17 +1,14 @@
+from fastapi import FastAPI, Request
+
 from app.config import GITHUB_WEBHOOK_SECRET
+from app.queue import get_redis
 
 from app.github.validator import verify_signature
 
-from app.services.review_service import review_pull_request
-
 from app.database.repository import (
-    already_reviewed,
-    create_review_event,
     register_webhook_delivery,
+    claim_review,
 )
-
-
-from fastapi import FastAPI, Request
 
 
 app = FastAPI()
@@ -19,7 +16,6 @@ app = FastAPI()
 
 @app.get("/")
 async def root():
-
     return {
         "status": "running",
         "project": "AI Pull Request Review Agent",
@@ -50,7 +46,7 @@ async def webhook(request: Request):
     )
 
     # --------------------------------
-    # 3. Get delivery ID
+    # 3. Get GitHub delivery ID
     # --------------------------------
 
     delivery_id = request.headers.get(
@@ -58,15 +54,13 @@ async def webhook(request: Request):
     )
 
     if not delivery_id:
-
         return {
             "status": "ignored",
             "reason": "missing delivery ID",
         }
 
- 
     # --------------------------------
-    # 5. Parse payload
+    # 4. Parse payload
     # --------------------------------
 
     payload = await request.json()
@@ -77,8 +71,6 @@ async def webhook(request: Request):
 
     action = payload.get("action")
 
-
-
     print(
         f"GitHub Event: {event_type}"
     )
@@ -87,22 +79,30 @@ async def webhook(request: Request):
         f"Action: {action}"
     )
 
+    print(
+        f"Delivery ID: {delivery_id}"
+    )
+
+    # --------------------------------
+    # 5. Webhook delivery idempotency
+    # --------------------------------
+
     is_new_delivery = register_webhook_delivery(
-    delivery_id=delivery_id,
-    event_type=event_type,
-    action=action,
+        delivery_id=delivery_id,
+        event_type=event_type,
+        action=action,
     )
 
     if not is_new_delivery:
 
         print(
-        f"Duplicate webhook ignored: {delivery_id}"
-    )
+            f"Duplicate webhook ignored: {delivery_id}"
+        )
 
-    return {
-        "status": "ignored",
-        "reason": "duplicate delivery",
-    }
+        return {
+            "status": "ignored",
+            "reason": "duplicate delivery",
+        }
 
     # --------------------------------
     # 6. Only process pull_request
@@ -165,105 +165,74 @@ async def webhook(request: Request):
     )
 
     # --------------------------------
-    # 9. PostgreSQL review idempotency
+    # 9. Claim review in PostgreSQL
+    # --------------------------------
+    #
+    # This atomically checks whether
+    # this exact PR + commit has already
+    # been queued/reviewed.
+    #
+    # If it already exists:
+    #     claim_review() -> False
+    #
+    # If it is new:
+    #     claim_review() -> True
+    #
     # --------------------------------
 
-    if already_reviewed(
+    claimed = claim_review(
         repository=repository_name,
         pr_number=pr_number,
         commit_sha=commit_sha,
-    ):
+    )
+
+    if not claimed:
 
         print(
-            "Duplicate review ignored: "
-            f"{repository_name}:{pr_number}:{commit_sha}"
+            "Review already queued or processed:"
+            f" {repository_name}:{pr_number}:{commit_sha}"
         )
 
         return {
             "status": "ignored",
-            "reason": "PR commit already reviewed",
+            "reason": "review already queued or processed",
         }
 
     # --------------------------------
-    # 10. Run AI review
+    # 10. Get Redis connection
     # --------------------------------
 
-    review, decision = review_pull_request(
+    redis = await get_redis()
+
+    # --------------------------------
+    # 11. Queue review job
+    # --------------------------------
+
+    job = await redis.enqueue_job(
+        "review_pr",
         installation_id=installation_id,
         owner=owner,
         repo=repo,
         pr_number=pr_number,
-    )
-
-    # --------------------------------
-    # 11. Save successful review
-    # --------------------------------
-
-    create_review_event(
         repository=repository_name,
-        pr_number=pr_number,
         commit_sha=commit_sha,
-        status="completed",
-        decision=decision,
     )
-
-    # --------------------------------
-    # 12. Print AI findings
-    # --------------------------------
 
     print(
-        "\n========== AI REVIEW ==========\n"
+        f"Review queued for PR #{pr_number}"
     )
 
-    for finding in review.findings:
-
-        print(
-            "Severity:",
-            finding.severity,
-        )
-
-        print(
-            "Category:",
-            finding.category,
-        )
-
-        print(
-            "File:",
-            finding.file,
-        )
-
-        print(
-            "Line:",
-            finding.line,
-        )
-
-        print(
-            "Title:",
-            finding.title,
-        )
-
-        print(
-            "Description:",
-            finding.description,
-        )
-
-        print(
-            "Suggestion:",
-            finding.suggestion,
-        )
-
     print(
-        "Decision:",
-        decision,
+        f"Job ID: {job.job_id}"
     )
 
     # --------------------------------
-    # 13. Response
+    # 12. Return immediately
     # --------------------------------
 
     return {
-        "status": "review_completed",
+        "status": "queued",
         "pr": pr_number,
-        "findings": len(review.findings),
-        "decision": decision,
+        "commit_sha": commit_sha,
+        "job_id": job.job_id,
     }

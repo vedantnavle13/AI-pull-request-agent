@@ -1,92 +1,28 @@
+import json
+
+from psycopg2.extras import Json
+
+from psycopg.types.json import Jsonb
 from app.database.postgres import get_connection
-
-
-def already_reviewed(
-    repository: str,
-    pr_number: int,
-    commit_sha: str,
-) -> bool:
-
-    with get_connection() as conn:
-
-        with conn.cursor() as cursor:
-
-            cursor.execute(
-                """
-                SELECT 1
-                FROM review_events
-                WHERE repository = %s
-                  AND pr_number = %s
-                  AND commit_sha = %s
-                LIMIT 1;
-                """,
-                (
-                    repository,
-                    pr_number,
-                    commit_sha,
-                ),
-            )
-
-            return cursor.fetchone() is not None
-
-
-def create_review_event(
-    repository: str,
-    pr_number: int,
-    commit_sha: str,
-    status: str,
-    decision: str | None = None,
-):
-
-    with get_connection() as conn:
-
-        with conn.cursor() as cursor:
-
-            cursor.execute(
-                """
-                INSERT INTO review_events (
-                    repository,
-                    pr_number,
-                    commit_sha,
-                    status,
-                    decision
-                )
-                VALUES (%s, %s, %s, %s, %s)
-                ON CONFLICT (
-                    repository,
-                    pr_number,
-                    commit_sha
-                )
-                DO NOTHING
-                RETURNING id;
-                """,
-                (
-                    repository,
-                    pr_number,
-                    commit_sha,
-                    status,
-                    decision,
-                ),
-            )
-
-            result = cursor.fetchone()
-
-        conn.commit()
-
-        return result[0] if result else None
-
 
 
 def register_webhook_delivery(
     delivery_id: str,
-    event_type: str | None,
+    event_type: str,
     action: str | None,
 ) -> bool:
+    """
+    Persist a GitHub webhook delivery ID.
 
-    with get_connection() as conn:
+    Returns:
+        True  -> this delivery is new
+        False -> this delivery was already processed
+    """
 
+    conn = get_connection()
+
+    try:
         with conn.cursor() as cursor:
-
             cursor.execute(
                 """
                 INSERT INTO webhook_deliveries (
@@ -97,7 +33,6 @@ def register_webhook_delivery(
                 VALUES (%s, %s, %s)
                 ON CONFLICT (delivery_id)
                 DO NOTHING
-                RETURNING delivery_id;
                 """,
                 (
                     delivery_id,
@@ -106,8 +41,218 @@ def register_webhook_delivery(
                 ),
             )
 
-            result = cursor.fetchone()
+            created = cursor.rowcount == 1
 
         conn.commit()
 
-        return result is not None        
+        return created
+
+    finally:
+        conn.close()
+
+
+def create_review(
+    repository: str,
+    pr_number: int,
+    commit_sha: str,
+) -> bool:
+    """
+    Create a review record.
+
+    Returns:
+        True  -> new review created
+        False -> review already exists
+    """
+
+    conn = get_connection()
+
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+    """
+    INSERT INTO reviews (
+        repository,
+        pr_number,
+        commit_sha,
+        status,
+        decision
+    )
+    VALUES (%s, %s, %s, 'QUEUED', 'PENDING')
+    ON CONFLICT (
+        repository,
+        pr_number,
+        commit_sha
+    )
+    DO NOTHING
+    """,
+    (
+        repository,
+        pr_number,
+        commit_sha,
+    ),
+)
+
+            created = cursor.rowcount == 1
+
+        conn.commit()
+
+        return created
+
+    finally:
+        conn.close()
+
+
+def claim_review(
+    repository: str,
+    pr_number: int,
+    commit_sha: str,
+) -> bool:
+    """
+    Atomically claim a PR commit for review.
+
+    This is the PostgreSQL-backed PR/commit idempotency check.
+    """
+
+    return create_review(
+        repository=repository,
+        pr_number=pr_number,
+        commit_sha=commit_sha,
+    )
+
+
+def update_review_status(
+    repository: str,
+    pr_number: int,
+    commit_sha: str,
+    status: str,
+):
+    """
+    Update the status of an existing review.
+    """
+
+    conn = get_connection()
+
+    try:
+        with conn.cursor() as cursor:
+
+            if status == "PROCESSING":
+                cursor.execute(
+                    """
+                    UPDATE reviews
+                    SET
+                        status = %s,
+                        started_at = CURRENT_TIMESTAMP
+                    WHERE repository = %s
+                      AND pr_number = %s
+                      AND commit_sha = %s
+                    """,
+                    (
+                        status,
+                        repository,
+                        pr_number,
+                        commit_sha,
+                    ),
+                )
+
+            else:
+                cursor.execute(
+                    """
+                    UPDATE reviews
+                    SET
+                        status = %s
+                    WHERE repository = %s
+                      AND pr_number = %s
+                      AND commit_sha = %s
+                    """,
+                    (
+                        status,
+                        repository,
+                        pr_number,
+                        commit_sha,
+                    ),
+                )
+
+        conn.commit()
+
+    finally:
+        conn.close()
+
+
+def complete_review(
+    repository: str,
+    pr_number: int,
+    commit_sha: str,
+    decision: str,
+    findings: list,
+):
+    """
+    Mark a review as completed and save the AI result.
+    """
+
+    conn = get_connection()
+
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE reviews
+                SET
+                    status = 'COMPLETED',
+                    decision = %s,
+                    findings = %s,
+                    completed_at = CURRENT_TIMESTAMP
+                WHERE repository = %s
+                  AND pr_number = %s
+                  AND commit_sha = %s
+                """,
+                (
+                    decision,
+                    Jsonb(findings),
+                    repository,
+                    pr_number,
+                    commit_sha,
+                ),
+            )
+
+        conn.commit()
+
+    finally:
+        conn.close()
+
+
+def fail_review(
+    repository: str,
+    pr_number: int,
+    commit_sha: str,
+    error_message: str,
+):
+    """
+    Mark a review as failed and save the error.
+    """
+
+    conn = get_connection()
+
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE reviews
+                SET
+                    status = 'FAILED',
+                    error_message = %s
+                WHERE repository = %s
+                  AND pr_number = %s
+                  AND commit_sha = %s
+                """,
+                (
+                    error_message,
+                    repository,
+                    pr_number,
+                    commit_sha,
+                ),
+            )
+
+        conn.commit()
+
+    finally:
+        conn.close()
