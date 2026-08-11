@@ -1,7 +1,10 @@
 import json
 
 from psycopg2.extras import Json
+# pyrefly: ignore [missing-import]
+from psycopg.types.json import Json
 
+# pyrefly: ignore [missing-import]
 from psycopg.types.json import Jsonb
 from app.database.postgres import get_connection
 
@@ -107,18 +110,51 @@ def claim_review(
     pr_number: int,
     commit_sha: str,
 ) -> bool:
-    """
-    Atomically claim a PR commit for review.
 
-    This is the PostgreSQL-backed PR/commit idempotency check.
-    """
+    conn = get_connection()
 
-    return create_review(
-        repository=repository,
-        pr_number=pr_number,
-        commit_sha=commit_sha,
-    )
+    try:
 
+        with conn.cursor() as cursor:
+
+            cursor.execute(
+                """
+                INSERT INTO reviews (
+                    repository,
+                    pr_number,
+                    commit_sha,
+                    status
+                )
+                VALUES (
+                    %s,
+                    %s,
+                    %s,
+                    'QUEUED'
+                )
+                ON CONFLICT (
+                    repository,
+                    pr_number,
+                    commit_sha
+                )
+                DO NOTHING
+                RETURNING id
+                """,
+                (
+                    repository,
+                    pr_number,
+                    commit_sha,
+                ),
+            )
+
+            row = cursor.fetchone()
+
+        conn.commit()
+
+        return row is not None
+
+    finally:
+
+        conn.close()
 
 def update_review_status(
     repository: str,
@@ -179,11 +215,12 @@ def update_review_status(
 
 
 def complete_review(
-    repository: str,
-    pr_number: int,
-    commit_sha: str,
-    decision: str,
-    findings: list,
+    repository,
+    pr_number,
+    commit_sha,
+    decision,
+    findings,
+    github_review_id=None,
 ):
     """
     Mark a review as completed and save the AI result.
@@ -226,10 +263,6 @@ def fail_review(
     commit_sha: str,
     error_message: str,
 ):
-    """
-    Mark a review as failed and save the error.
-    """
-
     conn = get_connection()
 
     try:
@@ -239,7 +272,8 @@ def fail_review(
                 UPDATE reviews
                 SET
                     status = 'FAILED',
-                    error_message = %s
+                    error_message = %s,
+                    completed_at = CURRENT_TIMESTAMP
                 WHERE repository = %s
                   AND pr_number = %s
                   AND commit_sha = %s
@@ -256,3 +290,94 @@ def fail_review(
 
     finally:
         conn.close()
+
+
+def requeue_review(
+    repository: str,
+    pr_number: int,
+    commit_sha: str,
+):
+    conn = get_connection()
+
+    try:
+        with conn.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE reviews
+                SET
+                    status = 'QUEUED',
+                    error_message = NULL
+                WHERE repository = %s
+                  AND pr_number = %s
+                  AND commit_sha = %s
+                """,
+                (
+                    repository,
+                    pr_number,
+                    commit_sha,
+                ),
+            )
+
+        conn.commit()
+
+    finally:
+        conn.close()        
+
+
+def get_review(
+    repository: str,
+    pr_number: int,
+    commit_sha: str,
+):
+    conn = get_connection()
+
+    try:
+        with conn.cursor() as cursor:
+
+            cursor.execute(
+                """
+                SELECT
+                    repository,
+                    pr_number,
+                    commit_sha,
+                    decision,
+                    status,
+                    findings,
+                    error_message,
+                    attempts,
+                    created_at,
+                    started_at,
+                    completed_at
+                FROM reviews
+                WHERE repository = %s
+                  AND pr_number = %s
+                  AND commit_sha = %s
+                """,
+                (
+                    repository,
+                    pr_number,
+                    commit_sha,
+                ),
+            )
+
+            row = cursor.fetchone()
+
+            if not row:
+                return None
+
+            return {
+                "repository": row[0],
+                "pr_number": row[1],
+                "commit_sha": row[2],
+                "decision": row[3],
+                "status": row[4],
+                "findings": row[5],
+                "error_message": row[6],
+                "attempts": row[7],
+                "created_at": row[8],
+                "started_at": row[9],
+                "completed_at": row[10],
+            }
+
+    finally:
+        conn.close()        

@@ -4,6 +4,7 @@ from app.config import GITHUB_WEBHOOK_SECRET
 from app.queue import get_redis
 
 from app.github.validator import verify_signature
+from app.database.repository import get_review
 
 from app.database.repository import (
     register_webhook_delivery,
@@ -236,3 +237,25 @@ async def webhook(request: Request):
         "commit_sha": commit_sha,
         "job_id": job.job_id,
     }
+
+
+
+@app.get("/reviews/{repository:path}/{pr_number}/{commit_sha}")
+async def review_status(
+    repository: str,
+    pr_number: int,
+    commit_sha: str,
+):
+    review = get_review(
+        repository=repository,
+        pr_number=pr_number,
+        commit_sha=commit_sha,
+    )
+
+    if not review:
+        return {
+            "status": "not_found",
+            "message": "Review not found",
+        }
+
+    return review    
