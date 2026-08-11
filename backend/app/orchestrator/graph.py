@@ -1,4 +1,9 @@
+import os
+
 from langgraph.graph import StateGraph, START, END
+
+# Ensure LangSmith env vars are applied before graph is compiled.
+import app.config  # noqa: F401
 
 from app.orchestrator.state import ReviewState
 
@@ -152,7 +157,12 @@ def build_review_graph():
         "decision",
         END,
     )
-    return graph.compile()
- 
- 
- 
+
+    compiled = graph.compile()
+
+    # LangGraph sends traces to LangSmith automatically when
+    # LANGCHAIN_TRACING_V2=true and LANGCHAIN_API_KEY are set.
+    # No extra configuration is needed here — the env vars set by
+    # app.config are sufficient.
+
+    return compiled

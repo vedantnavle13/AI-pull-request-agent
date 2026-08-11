@@ -169,90 +169,114 @@ def validate_review(state: ReviewState) -> dict:
 
 
 # ============================================================
-# 8. VALIDATE TEST RESULTS
+# 8. VALIDATE AGAINST TEST EVIDENCE
 # ============================================================
 
 def validate_tests(state: ReviewState) -> dict:
     """
-    Second validation layer.
+    Cross-check AI findings against actual test evidence.
 
-    At this stage actual test execution has not yet
-    been implemented.
-
-    This node records the current status so that the
-    workflow has a dedicated test-validation stage.
+    test_results are pre-populated in state by the worker BEFORE
+    graph.invoke() is called, so this node reads (not writes) them.
     """
 
-    validation_errors = state.get(
-        "validation_errors",
-        [],
+    from app.agents.evidence_validator import EvidenceValidator
+    from app.models.test_results import TestResult
+
+    findings = state.get("findings", [])
+    diff = state.get("diff", "")
+
+    # Deserialize test_results dicts → TestResult objects.
+    raw_test_results = state.get("test_results", [])
+    test_results: list[TestResult] = []
+    for r in raw_test_results:
+        if isinstance(r, TestResult):
+            test_results.append(r)
+        elif isinstance(r, dict):
+            try:
+                test_results.append(TestResult(**r))
+            except Exception:
+                pass
+
+    ev_validator = EvidenceValidator()
+    evidence_objs, ev_errors = ev_validator.validate(
+        findings=findings,
+        test_results=test_results,
+        diff=diff,
     )
 
-    if validation_errors:
-        return {
-            "test_results": [
-                {
-                    "status": "BLOCKED",
-                    "message": (
-                        "Test validation blocked because "
-                        "AI finding validation failed."
-                    ),
-                }
-            ]
-        }
+    # Merge evidence errors into the existing validation_errors list.
+    existing_errors = list(state.get("validation_errors", []))
+    all_errors = existing_errors + ev_errors
 
     return {
-        "test_results": [
-            {
-                "status": "NOT_RUN",
-                "message": (
-                    "Actual test execution will be "
-                    "implemented in the next phase."
-                ),
-            }
-        ]
+        "evidence": [e.model_dump() for e in evidence_objs],
+        "validation_errors": all_errors,
     }
 
 
 # ============================================================
-# 9. FINAL DECISION
+# 9. FINAL EVIDENCE-AWARE DECISION
 # ============================================================
 
 def final_decision(state: ReviewState) -> dict:
     """
-    Decide whether the PR can be automatically approved
-    or requires human review.
+    Produce the final policy decision using:
+        - AI findings
+        - Validation errors
+        - Test results
+        - Evidence
+
+    Decisions:
+        APPROVE       — no valid findings, tests pass (or not applicable)
+        HUMAN_REVIEW  — findings present or inconclusive test status
+        REJECT        — (reserved for future policy hardening)
     """
 
     findings = state.get("findings", [])
+    validation_errors = state.get("validation_errors", [])
+    evidence = state.get("evidence", [])
+    raw_test_results = state.get("test_results", [])
 
-    validation_errors = state.get(
-        "validation_errors",
-        [],
-    )
-
-    # Never auto-approve invalid AI output.
+    # --- 1. Never auto-approve invalid AI output. ---
     if validation_errors:
-        return {
-            "decision": "HUMAN_REVIEW"
-        }
+        return {"decision": "HUMAN_REVIEW"}
 
-    # HIGH / CRITICAL findings require human review.
-    high_severity = {
-        "HIGH",
-        "CRITICAL",
-    }
+    # --- 2. Determine overall test status. ---
+    test_statuses = set()
+    for r in raw_test_results:
+        if isinstance(r, dict):
+            test_statuses.add(r.get("status", "NOT_RUN"))
+        elif hasattr(r, "status"):
+            test_statuses.add(r.status)
 
-    requires_review = any(
-        finding.get("severity") in high_severity
-        for finding in findings
-    )
+    tests_failed = "FAILED" in test_statuses
+    tests_passed = "PASSED" in test_statuses and not tests_failed
+    tests_ran    = bool(test_statuses - {"NOT_RUN", "NOT_APPLICABLE"})
 
-    if requires_review:
-        return {
-            "decision": "HUMAN_REVIEW"
-        }
+    # --- 3. Tests failed → always escalate. ---
+    if tests_failed:
+        return {"decision": "HUMAN_REVIEW"}
 
-    return {
-        "decision": "APPROVE"
-    }
+    # --- 4. No valid AI findings at all. ---
+    if not findings:
+        if tests_passed or not tests_ran:
+            return {"decision": "APPROVE"}
+        # Inconclusive test state with no findings → be conservative.
+        return {"decision": "HUMAN_REVIEW"}
+
+    # --- 5. Any HIGH / CRITICAL finding → human review. ---
+    high_severity = {"HIGH", "CRITICAL"}
+    if any(f.get("severity") in high_severity for f in findings):
+        return {"decision": "HUMAN_REVIEW"}
+
+    # --- 6. Only LOW / MEDIUM findings remain. ---
+    # Check whether evidence supports them.
+    supported = [e for e in evidence if e.get("supports_finding")]
+
+    if supported or tests_passed:
+        # Evidence exists and tests pass → flag for human but note it's not severe.
+        return {"decision": "HUMAN_REVIEW"}
+
+    # Findings present but no supporting evidence and tests didn't pass clearly.
+    return {"decision": "HUMAN_REVIEW"}

@@ -16,8 +16,12 @@ class ReviewState(TypedDict, total=False):
     diff: str
     files: list[dict[str, Any]]
 
+    # DB record ID for this review (set by worker before graph runs).
+    review_id: int
+
     # -------------------------
     # Specialist agent results
+    # (each agent writes its own key — no concurrent update conflict)
     # -------------------------
 
     security_findings: list[dict[str, Any]]
@@ -38,10 +42,18 @@ class ReviewState(TypedDict, total=False):
     validation_errors: list[str]
 
     # -------------------------
-    # Test validation
+    # Test execution results
+    # (populated by worker BEFORE graph.invoke() — not inside graph)
     # -------------------------
 
     test_results: list[dict[str, Any]]
+
+    # -------------------------
+    # Evidence
+    # (populated by evidence_validator node inside graph)
+    # -------------------------
+
+    evidence: list[dict[str, Any]]
 
     # -------------------------
     # Final decision

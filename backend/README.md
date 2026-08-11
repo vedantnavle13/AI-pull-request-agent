@@ -1,165 +1,138 @@
 # Backend — AI Pull Request Review Agent
 
-This directory contains the FastAPI backend for the AI Pull Request Review Agent.
+An enterprise-grade, production-hardened AI agent system that reviews GitHub Pull Requests using Google Gemini and LangGraph. Automatically posts inline code comments and summary reviews on GitHub.
 
-## Current Flow
+## Architecture
 
 ```text
 GitHub Webhook
-      |
-      v
-app/main.py
-      |
-      v
-review_service.py
-      |
-      +--> GitHubClient
-      |       |
-      |       +--> authenticate
-      |       +--> fetch PR files
-      |
-      +--> reviewer.py
-      |       |
-      |       +--> Google Gemini
-      |       +--> ReviewResult
-      |
-      +--> policy.py
-      |
-      v
-GitHub PR Review
+      ↓
+FastAPI (app/main.py)
+      ↓ HMAC-SHA256 & Idempotency
+PostgreSQL (review_runs) + Redis Queue
+      ↓
+ARQ Worker (review_worker.py)
+      ↓
+PR Checkout (Isolated Directory)
+      ↓
+Subprocess Isolated Tests (TestRunner)
+      ↓
+LangGraph Orchestrator
+  ├── SecurityAgent (Gemini)
+  ├── QualityAgent (Gemini)
+  ├── TestAgent (Gemini)
+  └── DocsAgent (Gemini)
+      ↓
+Aggregator & Validator
+  ├── FindingValidator
+  └── EvidenceValidator
+      ↓
+Policy Engine (APPROVE / HUMAN_REVIEW / REJECT)
+      ↓
+ReviewPublisher (Summary + Inline Review Comments)
 ```
 
-## Important Modules
+For full architectural details, see [docs/architecture.md](file:///Users/vedant13/AI-pull-request-agent/backend/docs/architecture.md).
 
-### `app/main.py`
+---
 
-FastAPI application and GitHub webhook endpoint.
+## Environment Configuration
 
-```text
-POST /webhook
+Create a `.env` file in `backend/`:
+
+```env
+APP_NAME="AI Pull Request Agent"
+DEBUG=True
+HOST=0.0.0.0
+PORT=8000
+GITHUB_APP_ID=...
+GITHUB_PRIVATE_KEY_PATH=private-key.pem
+GEMINI_API_KEY=...
+GITHUB_WEBHOOK_SECRET=...
+DATABASE_URL=postgresql://localhost:5432/ai_pull_request_agent
+
+# Reliability & Sandbox Defaults
+MAX_REVIEW_RETRIES=3
+RETRY_BASE_DELAY_SECONDS=2
+REVIEW_STALE_TIMEOUT_SECONDS=900
+
+GEMINI_TIMEOUT_SECONDS=60
+GEMINI_MAX_RETRIES=3
+
+GITHUB_TIMEOUT_SECONDS=30
+GITHUB_MAX_RETRIES=3
+
+TEST_TIMEOUT_SECONDS=120
+MAX_TEST_MEMORY_MB=512
+MAX_TEST_CPUS=1
+
+LOG_LEVEL=INFO
+
+# Observability (Optional)
+LANGSMITH_TRACING=true
+LANGSMITH_ENDPOINT=https://api.smith.langchain.com
+LANGSMITH_API_KEY=...
+LANGSMITH_PROJECT=AI-pull-request-agent
 ```
 
-Responsibilities:
+---
 
-- Receive webhook
-- Validate webhook signature
-- Read GitHub event information
-- Start the PR review workflow
-- Return the webhook response
+## Running the Services
 
-### `app/github/auth.py`
-
-Handles GitHub App authentication and installation tokens.
-
-### `app/github/client.py`
-
-Wrapper around the GitHub API.
-
-Current responsibilities:
-
-- Fetch PR changed files
-- Create PR reviews
-- Support review events such as `COMMENT` and `APPROVE`
-
-### `app/github/diff.py`
-
-Converts GitHub's changed-file response into the internal diff representation used by the reviewer.
-
-### `app/github/validator.py`
-
-Validates GitHub's HMAC-SHA256 webhook signature.
-
-### `app/agents/reviewer.py`
-
-Calls Google Gemini and converts the model output into the structured `ReviewResult` schema.
-
-### `app/models/findings.py`
-
-Defines the Pydantic contract:
-
-```text
-Finding
-ReviewResult
+### 1. Start PostgreSQL & Redis
+```bash
+brew services start postgresql@14
+brew services start redis
 ```
 
-### `app/services/policy.py`
-
-Converts review findings into:
-
-```text
-BLOCK
-HUMAN_REVIEW
-APPROVE
+### 2. Run Database Migrations
+```bash
+source ../venv/bin/activate
+python -c "from app.database.migrations import ensure_schema; ensure_schema()"
 ```
 
-### `app/services/review_service.py`
-
-Coordinates:
-
-```text
-GitHub -> Diff -> Gemini -> Policy -> GitHub Review
+### 3. Start FastAPI Server
+```bash
+source ../venv/bin/activate
+uvicorn app.main:app --reload --port 8000
 ```
 
-### `app/services/idempotency.py`
+### 4. Start ARQ Worker
+```bash
+source ../venv/bin/activate
+arq app.workers.review_worker.WorkerSettings
+```
 
-Current in-memory webhook delivery ID tracking.
+---
 
-This is temporary and will later be replaced with persistent database-backed idempotency.
+## API & Health Probes
 
-## Run
+- **Liveness Probe**: `GET /health` (`status: ok`)
+- **Readiness Probe**: `GET /ready` (Verifies PostgreSQL and Redis connectivity)
+- **GitHub Webhook**: `POST /webhook`
+- **Review Status Query**: `GET /reviews/{owner}/{repo}/{pr_number}/{commit_sha}`
 
-From this directory:
+---
+
+## Running Tests
+
+Run the complete 104+ test suite:
 
 ```bash
 source ../venv/bin/activate
-pip install -r requirements.txt
-uvicorn app.main:app --reload
+pytest
 ```
 
-## Test Gemini Directly
+Run Phase 12 reliability regression tests:
 
 ```bash
-python -m app.agents.test_gemini
+pytest tests/phase12/test_phase12_reliability.py -v
 ```
 
-## Environment
+---
 
-Create:
+## Security & Reliability Documentation
 
-```text
-.env
-```
-
-with values similar to:
-
-```env
-GEMINI_API_KEY=...
-GITHUB_APP_ID=...
-GITHUB_WEBHOOK_SECRET=...
-```
-
-Never commit `.env` or the GitHub App private key.
-
-## Current Development Status
-
-Working:
-
-- GitHub App webhook
-- GitHub App authentication
-- PR file retrieval
-- Gemini review
-- Structured findings
-- Policy decisions
-- GitHub PR comments/reviews
-- AI approval path
-- Webhook signature validation
-- Basic delivery-ID idempotency
-
-Next:
-
-- Filter `pull_request` actions
-- PR + HEAD SHA idempotency
-- PostgreSQL persistence
-- Redis + ARQ worker
-- LangGraph multi-agent orchestration
-- Inline review comments
+- [docs/architecture.md](file:///Users/vedant13/AI-pull-request-agent/backend/docs/architecture.md)
+- [docs/reliability.md](file:///Users/vedant13/AI-pull-request-agent/backend/docs/reliability.md)
+- [docs/security.md](file:///Users/vedant13/AI-pull-request-agent/backend/docs/security.md)
