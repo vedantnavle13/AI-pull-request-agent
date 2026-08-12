@@ -10,10 +10,17 @@ from app.database.repository import (
     get_review,
 )
 from app.utils.logger import get_logger
+from app.api.metrics import router as metrics_router
 
 logger = get_logger(__name__)
 
-app = FastAPI(title="AI Pull Request Review Agent")
+app = FastAPI(
+    title="AI Pull Request Review Agent",
+    description="AI-powered code review with full observability (Phase 14)",
+    version="14.0.0",
+)
+
+app.include_router(metrics_router, prefix="/metrics")
 
 
 @app.get("/")
@@ -144,12 +151,16 @@ async def webhook(request: Request):
     logger.info("Processing PR #%d on %s (SHA: %s)", pr_number, repository_name, commit_sha[:8])
 
     # 9. Claim review in review_runs & legacy reviews table
+    # force_new=True for 'opened'/'reopened': always run a fresh review even if
+    # this SHA was previously reviewed (user closed+reopened or re-opened after fix).
+    force_new = action in {"opened", "reopened"}
     claim_res = claim_review_run(
         installation_id=installation_id,
         owner=owner,
         repo=repo,
         pr_number=pr_number,
         commit_sha=commit_sha,
+        force_new=force_new,
     )
 
     # Keep legacy reviews table updated for backward compatibility

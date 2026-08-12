@@ -1,4 +1,5 @@
 from unittest.mock import patch, MagicMock
+import pytest
 
 from app.agents.contracts import AgentResult, Finding
 from app.orchestrator.graph import build_review_graph
@@ -36,12 +37,14 @@ def _mock_agent(result: AgentResult) -> MagicMock:
 # Tests
 # ---------------------------------------------------------------------------
 
-def test_review_graph():
+@pytest.mark.anyio
+async def test_review_graph():
     """
     Verify the graph wiring end-to-end WITHOUT hitting the Gemini API.
 
     All four specialist agents are patched so the test is fast,
     deterministic, and costs zero API quota.
+    Uses ainvoke() because the 4 agent nodes are now async def.
     """
 
     mock_security = _mock_agent(FAKE_SECURITY_RESULT)
@@ -57,7 +60,7 @@ def test_review_graph():
     ):
         graph = build_review_graph()
 
-        result = graph.invoke({
+        result = await graph.ainvoke({
             "installation_id": 1,
             "owner": "test",
             "repo": "demo",
@@ -65,7 +68,7 @@ def test_review_graph():
             "commit_sha": "abc123",
             "diff": "print('hello')",
             "files": [{"filename": "main.py"}],
-            # Pre-populate test_results as the worker does before invoke().
+            # Pre-populate test_results as the worker does before ainvoke().
             "test_results": [{"status": "PASSED"}],
         })
 

@@ -1,3 +1,6 @@
+import asyncio
+import time
+
 from app.orchestrator.state import ReviewState
 
 from app.agents.security_agent import SecurityAgent
@@ -38,17 +41,32 @@ def build_context(state: ReviewState) -> dict:
 # 2. SECURITY AGENT
 # ============================================================
 
-def run_security(state: ReviewState) -> dict:
-    result = security_agent.review(
-        diff=state.get("diff", ""),
-        files=state.get("files", []),
-    )
+async def run_security(state: ReviewState) -> dict:
+    started_at = time.time()
+    success = True
+    findings = []
+
+    try:
+        result = await asyncio.to_thread(
+            security_agent.review,
+            diff=state.get("diff", ""),
+            files=state.get("files", []),
+        )
+        findings = [f.model_dump() for f in result.findings]
+    except Exception:
+        success = False
+        raise
+    finally:
+        completed_at = time.time()
+        duration_ms = int((completed_at - started_at) * 1000)
 
     return {
-        "security_findings": [
-            finding.model_dump()
-            for finding in result.findings
-        ]
+        "security_findings":      findings,
+        "security_started_at":    started_at,
+        "security_completed_at":  completed_at,
+        "security_duration_ms":   duration_ms,
+        "security_success":       success,
+        "security_usage":         dict(security_agent.last_usage),
     }
 
 
@@ -56,17 +74,32 @@ def run_security(state: ReviewState) -> dict:
 # 3. QUALITY AGENT
 # ============================================================
 
-def run_quality(state: ReviewState) -> dict:
-    result = quality_agent.review(
-        diff=state.get("diff", ""),
-        files=state.get("files", []),
-    )
+async def run_quality(state: ReviewState) -> dict:
+    started_at = time.time()
+    success = True
+    findings = []
+
+    try:
+        result = await asyncio.to_thread(
+            quality_agent.review,
+            diff=state.get("diff", ""),
+            files=state.get("files", []),
+        )
+        findings = [f.model_dump() for f in result.findings]
+    except Exception:
+        success = False
+        raise
+    finally:
+        completed_at = time.time()
+        duration_ms = int((completed_at - started_at) * 1000)
 
     return {
-        "quality_findings": [
-            finding.model_dump()
-            for finding in result.findings
-        ]
+        "quality_findings":      findings,
+        "quality_started_at":    started_at,
+        "quality_completed_at":  completed_at,
+        "quality_duration_ms":   duration_ms,
+        "quality_success":       success,
+        "quality_usage":         dict(quality_agent.last_usage),
     }
 
 
@@ -74,17 +107,32 @@ def run_quality(state: ReviewState) -> dict:
 # 4. TEST AGENT
 # ============================================================
 
-def run_tests(state: ReviewState) -> dict:
-    result = test_agent.review(
-        diff=state.get("diff", ""),
-        files=state.get("files", []),
-    )
+async def run_tests(state: ReviewState) -> dict:
+    started_at = time.time()
+    success = True
+    findings = []
+
+    try:
+        result = await asyncio.to_thread(
+            test_agent.review,
+            diff=state.get("diff", ""),
+            files=state.get("files", []),
+        )
+        findings = [f.model_dump() for f in result.findings]
+    except Exception:
+        success = False
+        raise
+    finally:
+        completed_at = time.time()
+        duration_ms = int((completed_at - started_at) * 1000)
 
     return {
-        "test_findings": [
-            finding.model_dump()
-            for finding in result.findings
-        ]
+        "test_findings":      findings,
+        "tests_started_at":   started_at,
+        "tests_completed_at": completed_at,
+        "tests_duration_ms":  duration_ms,
+        "tests_success":      success,
+        "tests_usage":        dict(test_agent.last_usage),
     }
 
 
@@ -92,17 +140,32 @@ def run_tests(state: ReviewState) -> dict:
 # 5. DOCUMENTATION AGENT
 # ============================================================
 
-def run_docs(state: ReviewState) -> dict:
-    result = docs_agent.review(
-        diff=state.get("diff", ""),
-        files=state.get("files", []),
-    )
+async def run_docs(state: ReviewState) -> dict:
+    started_at = time.time()
+    success = True
+    findings = []
+
+    try:
+        result = await asyncio.to_thread(
+            docs_agent.review,
+            diff=state.get("diff", ""),
+            files=state.get("files", []),
+        )
+        findings = [f.model_dump() for f in result.findings]
+    except Exception:
+        success = False
+        raise
+    finally:
+        completed_at = time.time()
+        duration_ms = int((completed_at - started_at) * 1000)
 
     return {
-        "docs_findings": [
-            finding.model_dump()
-            for finding in result.findings
-        ]
+        "docs_findings":      findings,
+        "docs_started_at":    started_at,
+        "docs_completed_at":  completed_at,
+        "docs_duration_ms":   duration_ms,
+        "docs_success":       success,
+        "docs_usage":         dict(docs_agent.last_usage),
     }
 
 

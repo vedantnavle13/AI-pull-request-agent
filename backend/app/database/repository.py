@@ -1,4 +1,5 @@
 import json
+import uuid
 
 from psycopg2.extras import Json
 # pyrefly: ignore [missing-import]
@@ -7,6 +8,7 @@ from psycopg.types.json import Json
 # pyrefly: ignore [missing-import]
 from psycopg.types.json import Jsonb
 from app.database.postgres import get_connection
+
 
 
 def register_webhook_delivery(
@@ -612,17 +614,22 @@ def claim_review_run(
     repo: str,
     pr_number: int,
     commit_sha: str,
+    force_new: bool = False,
 ) -> ReviewClaim:
     """
     Atomically claims or checks a review run based on the full identity:
     installation_id + owner + repo + pr_number + commit_sha.
+
+    force_new=True: used when action='opened' (brand-new PR or re-opened after close).
+    Resets any COMPLETED/FAILED row so the PR always gets a fresh review.
     """
     conn = get_connection()
 
     try:
         with conn.cursor() as cursor:
-            # First check legacy reviews table for COMPLETED
             full_repo = f"{owner}/{repo}"
+
+            # Check legacy reviews table for COMPLETED — skip unless force_new.
             cursor.execute(
                 """
                 SELECT id, status FROM reviews
@@ -631,8 +638,16 @@ def claim_review_run(
                 (full_repo, pr_number, commit_sha),
             )
             legacy_row = cursor.fetchone()
-            if legacy_row and legacy_row[1] == "COMPLETED":
+            if legacy_row and legacy_row[1] == "COMPLETED" and not force_new:
                 return ReviewClaim(claimed=False, review_id=str(legacy_row[0]), reason="already_completed")
+
+            # If force_new and legacy row is COMPLETED, reset it so the worker can rerun.
+            if legacy_row and legacy_row[1] == "COMPLETED" and force_new:
+                cursor.execute(
+                    "UPDATE reviews SET status = 'QUEUED', started_at = NULL, completed_at = NULL "
+                    "WHERE id = %s",
+                    (legacy_row[0],),
+                )
 
             cursor.execute(
                 """
@@ -653,9 +668,21 @@ def claim_review_run(
                 review_id, status, started_at, attempt_count = str(row[0]), row[1], row[2], row[3]
 
                 if status == "COMPLETED":
-                    return ReviewClaim(claimed=False, review_id=review_id, reason="already_completed")
+                    if not force_new:
+                        return ReviewClaim(claimed=False, review_id=review_id, reason="already_completed")
+                    # force_new: reset to QUEUED so worker re-runs review for the new PR.
+                    cursor.execute(
+                        """
+                        UPDATE review_runs
+                        SET status = 'QUEUED', started_at = NULL, updated_at = CURRENT_TIMESTAMP, attempt_count = 0
+                        WHERE id = %s
+                        """,
+                        (review_id,),
+                    )
+                    conn.commit()
+                    return ReviewClaim(claimed=True, review_id=review_id, reason="force_new_reset")
 
-                if status == "DEAD_LETTER":
+                if status == "DEAD_LETTER" and not force_new:
                     return ReviewClaim(claimed=False, review_id=review_id, reason="dead_letter")
 
 
@@ -699,14 +726,14 @@ def claim_review_run(
                 conn.commit()
                 return ReviewClaim(claimed=True, review_id=review_id)
 
-            # Insert new review_run
+            # Insert new review_run as QUEUED — only the worker transitions to PROCESSING.
             new_id = str(uuid.uuid4())
             cursor.execute(
                 """
                 INSERT INTO review_runs (
-                    id, installation_id, owner, repo, pr_number, commit_sha, status, attempt_count, started_at
+                    id, installation_id, owner, repo, pr_number, commit_sha, status, attempt_count
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, 'PROCESSING', 1, CURRENT_TIMESTAMP)
+                VALUES (%s, %s, %s, %s, %s, %s, 'QUEUED', 0)
                 ON CONFLICT (installation_id, owner, repo, pr_number, commit_sha) DO NOTHING
                 RETURNING id
                 """,
@@ -800,10 +827,14 @@ def record_review_metrics(
     total_duration_ms: int | None = None,
     queue_wait_ms: int | None = None,
     checkout_duration_ms: int | None = None,
+    context_build_ms: int | None = None,
     agent_duration_ms: int | None = None,
     validation_duration_ms: int | None = None,
     test_duration_ms: int | None = None,
     publishing_duration_ms: int | None = None,
+    auto_merge_ms: int | None = None,
+    final_decision: str | None = None,
+    final_status: str | None = None,
 ) -> None:
     """Record stage duration metrics for a review run."""
     conn = get_connection()
@@ -815,24 +846,607 @@ def record_review_metrics(
                 """
                 INSERT INTO review_metrics (
                     id, review_id, total_duration_ms, queue_wait_ms, checkout_duration_ms,
-                    agent_duration_ms, validation_duration_ms, test_duration_ms, publishing_duration_ms
+                    agent_duration_ms, validation_duration_ms, test_duration_ms, publishing_duration_ms,
+                    context_build_ms, auto_merge_ms, final_decision, final_status
                 )
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (review_id) DO UPDATE SET
-                    total_duration_ms = COALESCE(EXCLUDED.total_duration_ms, review_metrics.total_duration_ms),
-                    queue_wait_ms = COALESCE(EXCLUDED.queue_wait_ms, review_metrics.queue_wait_ms),
-                    checkout_duration_ms = COALESCE(EXCLUDED.checkout_duration_ms, review_metrics.checkout_duration_ms),
-                    agent_duration_ms = COALESCE(EXCLUDED.agent_duration_ms, review_metrics.agent_duration_ms),
+                    total_duration_ms      = COALESCE(EXCLUDED.total_duration_ms, review_metrics.total_duration_ms),
+                    queue_wait_ms          = COALESCE(EXCLUDED.queue_wait_ms, review_metrics.queue_wait_ms),
+                    checkout_duration_ms   = COALESCE(EXCLUDED.checkout_duration_ms, review_metrics.checkout_duration_ms),
+                    context_build_ms       = COALESCE(EXCLUDED.context_build_ms, review_metrics.context_build_ms),
+                    agent_duration_ms      = COALESCE(EXCLUDED.agent_duration_ms, review_metrics.agent_duration_ms),
                     validation_duration_ms = COALESCE(EXCLUDED.validation_duration_ms, review_metrics.validation_duration_ms),
-                    test_duration_ms = COALESCE(EXCLUDED.test_duration_ms, review_metrics.test_duration_ms),
-                    publishing_duration_ms = COALESCE(EXCLUDED.publishing_duration_ms, review_metrics.publishing_duration_ms)
+                    test_duration_ms       = COALESCE(EXCLUDED.test_duration_ms, review_metrics.test_duration_ms),
+                    publishing_duration_ms = COALESCE(EXCLUDED.publishing_duration_ms, review_metrics.publishing_duration_ms),
+                    auto_merge_ms          = COALESCE(EXCLUDED.auto_merge_ms, review_metrics.auto_merge_ms),
+                    final_decision         = COALESCE(EXCLUDED.final_decision, review_metrics.final_decision),
+                    final_status           = COALESCE(EXCLUDED.final_status, review_metrics.final_status)
                 """,
                 (
                     metric_id, review_id, total_duration_ms, queue_wait_ms, checkout_duration_ms,
-                    agent_duration_ms, validation_duration_ms, test_duration_ms, publishing_duration_ms
+                    agent_duration_ms, validation_duration_ms, test_duration_ms, publishing_duration_ms,
+                    context_build_ms, auto_merge_ms, final_decision, final_status
                 ),
             )
         conn.commit()
 
+    finally:
+        conn.close()
+
+
+# ===========================================================================
+# Phase 13 — Auto-Merge Repository Functions
+# ===========================================================================
+
+def claim_merge(review_id: str) -> bool:
+    """
+    Atomically claim the right to attempt auto-merge for this review.
+
+    Steps:
+      1. INSERT a row with merge_status='MERGING' ON CONFLICT DO NOTHING.
+         If inserted → we own it → return True.
+      2. If conflict (row already exists), check current status:
+         - MERGING / MERGED → another worker has it → return False.
+         - FAILED / ABORTED  → retry allowed → UPDATE to MERGING → return True.
+
+    The UNIQUE constraint on review_id prevents double-merge.
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            # Try to transition ELIGIBLE → MERGING atomically.
+            cur.execute(
+                """
+                UPDATE auto_merges
+                SET    merge_status     = 'MERGING',
+                       merge_started_at = NOW(),
+                       merge_attempts   = merge_attempts + 1,
+                       updated_at       = NOW()
+                WHERE  review_id    = %s
+                  AND  merge_status IN ('ELIGIBLE', 'FAILED')
+                RETURNING id
+                """,
+                (review_id,),
+            )
+            row = cur.fetchone()
+        conn.commit()
+        return row is not None
+    finally:
+        conn.close()
+
+
+def record_merge_result(
+    review_id: str,
+    merge_status: str,
+    *,
+    current_sha: str | None = None,
+    merge_commit_sha: str | None = None,
+    checks_status: str | None = None,
+    error: str | None = None,
+) -> None:
+    """
+    Persist the outcome of an auto-merge attempt.
+    Called after the GitHub merge API returns (success or failure).
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE auto_merges
+                SET    merge_status       = %s,
+                       merge_completed_at = CASE WHEN %s IN ('MERGED', 'FAILED', 'ABORTED')
+                                                 THEN NOW() ELSE merge_completed_at END,
+                       merge_commit_sha   = COALESCE(%s, merge_commit_sha),
+                       current_sha        = COALESCE(%s, current_sha),
+                       checks_status      = COALESCE(%s, checks_status),
+                       error              = COALESCE(%s, error),
+                       updated_at         = NOW()
+                WHERE  review_id = %s
+                """,
+                (
+                    merge_status,
+                    merge_status,
+                    merge_commit_sha,
+                    current_sha,
+                    checks_status,
+                    error,
+                    review_id,
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def create_merge_record(
+    review_id: str,
+    repository: str,
+    pr_number: int,
+    reviewed_sha: str,
+    decision: str,
+    merge_status: str = "NOT_ELIGIBLE",
+    merge_method: str | None = None,
+) -> None:
+    """
+    Insert the initial auto_merges row when the gate is first evaluated.
+    Uses ON CONFLICT DO NOTHING for idempotency (e.g. ARQ retries).
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO auto_merges (
+                    review_id, repository, pr_number, reviewed_sha,
+                    decision, merge_status, merge_method
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (review_id) DO NOTHING
+                """,
+                (review_id, repository, pr_number, reviewed_sha,
+                 decision, merge_status, merge_method),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_merge_record(review_id: str) -> dict | None:
+    """Return the auto_merges row for the given review_id, or None."""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT review_id, repository, pr_number, reviewed_sha,
+                       current_sha, decision, merge_status, merge_method,
+                       checks_status, merge_attempts, merge_started_at,
+                       merge_completed_at, merge_sha, merge_commit_sha, error
+                FROM   auto_merges
+                WHERE  review_id = %s
+                """,
+                (review_id,),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return None
+        keys = [
+            "review_id", "repository", "pr_number", "reviewed_sha",
+            "current_sha", "decision", "merge_status", "merge_method",
+            "checks_status", "merge_attempts", "merge_started_at",
+            "merge_completed_at", "merge_sha", "merge_commit_sha", "error",
+        ]
+        return dict(zip(keys, row))
+    finally:
+        conn.close()
+
+
+# ===========================================================================
+# Phase 14 — Observability & Economics Repository Functions
+# ===========================================================================
+
+def record_agent_metrics(
+    review_id: str,
+    agent_name: str,
+    *,
+    started_at=None,
+    completed_at=None,
+    duration_ms: int | None = None,
+    success: bool = True,
+    finding_count: int = 0,
+    error_type: str | None = None,
+    error_message: str | None = None,
+) -> None:
+    """Record timing and result metrics for a single agent run."""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO agent_metrics (
+                    review_id, agent_name, started_at, completed_at,
+                    duration_ms, success, finding_count, error_type, error_message
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                """,
+                (
+                    review_id, agent_name, started_at, completed_at,
+                    duration_ms, success, finding_count, error_type, error_message,
+                ),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def record_error_metric(
+    stage: str,
+    error_category: str,
+    *,
+    review_id: str | None = None,
+    error_type: str | None = None,
+    error_message: str | None = None,
+    retryable: bool = False,
+    attempt: int = 1,
+) -> None:
+    """Record a structured error event for failure analysis."""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO error_metrics (
+                    review_id, stage, error_category, error_type, error_message, retryable, attempt
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
+                """,
+                (review_id, stage, error_category, error_type, error_message, retryable, attempt),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_overview_metrics(repository: str | None = None) -> dict:
+    """
+    Return aggregate review statistics for the dashboard overview.
+    Optionally filtered by repository (owner/repo format).
+
+    NOTE: Uses review_runs (UUID primary key) and review_metrics (UUID FK).
+    The legacy 'reviews' table uses integer IDs and cannot join review_metrics.
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            # Build repository filter for review_runs
+            # repository format: 'owner/repo' -> split into owner + repo
+            if repository and '/' in repository:
+                owner_filter, repo_filter = repository.split('/', 1)
+                repo_params = (owner_filter, repo_filter)
+                rr_filter = "AND rr.owner = %s AND rr.repo = %s"
+            else:
+                repo_params = ()
+                rr_filter = ""
+
+            cur.execute(
+                f"""
+                SELECT
+                    COUNT(*)                                                   AS reviews_total,
+                    COUNT(*) FILTER (WHERE rr.status = 'COMPLETED')            AS completed,
+                    COUNT(*) FILTER (WHERE rr.status = 'FAILED')               AS failed,
+                    COUNT(*) FILTER (WHERE rr.status = 'DEAD_LETTER')          AS dead_letter,
+                    COUNT(*) FILTER (WHERE rm.final_decision = 'APPROVE')      AS approve,
+                    COUNT(*) FILTER (WHERE rm.final_decision = 'HUMAN_REVIEW') AS human_review,
+                    COUNT(*) FILTER (WHERE rm.final_decision = 'BLOCK')        AS block,
+                    ROUND(AVG(rm.total_duration_ms))                           AS avg_latency_ms,
+                    PERCENTILE_CONT(0.5) WITHIN GROUP
+                        (ORDER BY rm.total_duration_ms)                        AS p50_latency_ms,
+                    PERCENTILE_CONT(0.95) WITHIN GROUP
+                        (ORDER BY rm.total_duration_ms)                        AS p95_latency_ms,
+                    COALESCE(SUM(rr.attempt_count - 1), 0)                     AS total_retries
+                FROM   review_runs rr
+                LEFT JOIN review_metrics rm ON rm.review_id = rr.id
+                WHERE  1=1 {rr_filter}
+                """,
+                repo_params,
+            )
+            row = cur.fetchone()
+
+            cur.execute(
+                """
+                SELECT COUNT(*) FILTER (WHERE merge_status = 'MERGED'),
+                       COUNT(*) FILTER (WHERE merge_status = 'FAILED')
+                FROM   auto_merges
+                """
+            )
+            merge_row = cur.fetchone()
+
+            cur.execute(
+                """
+                SELECT COALESCE(SUM(estimated_cost), 0),
+                       CASE WHEN COUNT(DISTINCT review_id) > 0
+                            THEN SUM(estimated_cost) / COUNT(DISTINCT review_id)
+                            ELSE NULL END
+                FROM   llm_usage
+                WHERE  estimated_cost IS NOT NULL
+                """
+            )
+            cost_row = cur.fetchone()
+
+        if not row:
+            return {}
+
+        return {
+            "reviews_total":    int(row[0] or 0),
+            "completed":        int(row[1] or 0),
+            "failed":           int(row[2] or 0),
+            "dead_letter":      int(row[3] or 0),
+            "approve":          int(row[4] or 0),
+            "human_review":     int(row[5] or 0),
+            "block":            int(row[6] or 0),
+            "avg_latency_ms":   int(row[7]) if row[7] is not None else None,
+            "p50_latency_ms":   int(row[8]) if row[8] is not None else None,
+            "p95_latency_ms":   int(row[9]) if row[9] is not None else None,
+            "total_retries":    int(row[10] or 0),
+            "auto_merged":      int(merge_row[0] or 0) if merge_row else 0,
+            "auto_merge_failed":int(merge_row[1] or 0) if merge_row else 0,
+            "total_cost_usd":   float(cost_row[0]) if cost_row and cost_row[0] else None,
+            "avg_cost_usd":     float(cost_row[1]) if cost_row and cost_row[1] else None,
+        }
+    finally:
+        conn.close()
+
+
+def get_review_detail_metrics(review_id: str) -> dict | None:
+    """
+    Return detailed timing, agent, LLM usage and cost for one review.
+
+    Accepts:
+    - UUID (from review_runs.id) — preferred
+    - Plain string that might be a UUID with dashes stripped
+    If not found by UUID, returns None (the legacy 'reviews' integer ID
+    is not supported here; callers should use the UUID from review_runs).
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            # Core review — pull from review_runs + review_metrics
+            cur.execute(
+                """
+                SELECT rr.id, rr.owner, rr.repo, rr.pr_number, rr.commit_sha,
+                       rr.status, rm.total_duration_ms, rm.queue_wait_ms,
+                       rm.checkout_duration_ms, rm.context_build_ms,
+                       rm.agent_duration_ms, rm.validation_duration_ms,
+                       rm.test_duration_ms, rm.publishing_duration_ms,
+                       rm.auto_merge_ms, rm.final_decision, rm.final_status,
+                       rr.created_at, rr.started_at, rr.completed_at,
+                       rr.attempt_count, rr.error_type
+                FROM   review_runs rr
+                LEFT JOIN review_metrics rm ON rm.review_id = rr.id
+                WHERE  rr.id::text = %s
+                """,
+                (review_id,),
+            )
+            rr = cur.fetchone()
+            if not rr:
+                return None
+
+            # Per-agent metrics
+            cur.execute(
+                """
+                SELECT agent_name, duration_ms, success, finding_count,
+                       error_type, started_at, completed_at
+                FROM   agent_metrics
+                WHERE  review_id::text = %s
+                ORDER BY started_at ASC NULLS LAST
+                """,
+                (review_id,),
+            )
+            agents_raw = cur.fetchall()
+
+            # LLM usage
+            cur.execute(
+                """
+                SELECT agent, model, input_tokens, output_tokens, total_tokens, estimated_cost
+                FROM   llm_usage
+                WHERE  review_id = %s
+                ORDER BY agent
+                """,
+                (review_id,),
+            )
+            llm_raw = cur.fetchall()
+
+        agents = {}
+        for row in agents_raw:
+            agents[row[0]] = {
+                "duration_ms":   row[1],
+                "success":       row[2],
+                "finding_count": row[3],
+                "error_type":    row[4],
+                "started_at":    row[5].isoformat() if row[5] else None,
+                "completed_at":  row[6].isoformat() if row[6] else None,
+            }
+
+        llm_usage = []
+        total_cost = 0.0
+        has_cost = False
+        for row in llm_raw:
+            cost = float(row[5]) if row[5] is not None else None
+            if cost is not None:
+                total_cost += cost
+                has_cost = True
+            llm_usage.append({
+                "agent":         row[0],
+                "model":         row[1],
+                "input_tokens":  row[2],
+                "output_tokens": row[3],
+                "total_tokens":  row[4],
+                "estimated_cost":cost,
+            })
+
+        # Compute parallel wall-clock agent time = max of concurrent agent durations
+        parallel_wall_ms = None
+        if agents:
+            agent_durations = [v["duration_ms"] for v in agents.values() if v["duration_ms"] is not None]
+            if agent_durations:
+                parallel_wall_ms = max(agent_durations)
+
+        return {
+            "review_id":            str(rr[0]),
+            "owner":                rr[1],
+            "repo":                 rr[2],
+            "repository":           f"{rr[1]}/{rr[2]}",
+            "pr_number":            rr[3],
+            "commit_sha":           rr[4],
+            "status":               rr[5],
+            "timings": {
+                "total_ms":             rr[6],
+                "queue_wait_ms":        rr[7],
+                "checkout_ms":          rr[8],
+                "context_build_ms":     rr[9],
+                "agent_wall_clock_ms":  rr[10],      # total wall clock for all 4 agents
+                "parallel_agent_ms":    parallel_wall_ms,  # max(individual agent durations)
+                "validation_ms":        rr[11],
+                "test_ms":              rr[12],
+                "publish_ms":           rr[13],
+                "auto_merge_ms":        rr[14],
+            },
+            "final_decision":       rr[15],
+            "final_status":         rr[16],
+            "queued_at":            rr[17].isoformat() if rr[17] else None,
+            "started_at":           rr[18].isoformat() if rr[18] else None,
+            "completed_at":         rr[19].isoformat() if rr[19] else None,
+            "retry_count":          int(rr[20] - 1) if rr[20] is not None else 0,
+            "error_type":           rr[21],
+            "agents":               agents,
+            "llm_usage":            llm_usage,
+            "total_cost_usd":       round(total_cost, 8) if has_cost else None,
+        }
+
+    finally:
+        conn.close()
+
+
+def get_agent_metrics_summary() -> list[dict]:
+    """Return per-agent aggregate performance statistics."""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT
+                    agent_name,
+                    COUNT(*)                                     AS executions,
+                    ROUND(AVG(duration_ms))                      AS avg_duration_ms,
+                    PERCENTILE_CONT(0.95) WITHIN GROUP
+                        (ORDER BY duration_ms)                   AS p95_duration_ms,
+                    ROUND(100.0 * AVG(CASE WHEN success THEN 1.0 ELSE 0.0 END), 1) AS success_rate_pct,
+                    ROUND(AVG(finding_count), 2)                 AS avg_findings
+                FROM   agent_metrics
+                GROUP BY agent_name
+                ORDER BY agent_name
+                """
+            )
+            rows = cur.fetchall()
+        return [
+            {
+                "agent":            row[0],
+                "executions":       int(row[1]),
+                "avg_duration_ms":  int(row[2]) if row[2] is not None else None,
+                "p95_duration_ms":  int(row[3]) if row[3] is not None else None,
+                "success_rate_pct": float(row[4]) if row[4] is not None else None,
+                "avg_findings":     float(row[5]) if row[5] is not None else None,
+            }
+            for row in rows
+        ]
+    finally:
+        conn.close()
+
+
+def get_cost_summary() -> dict:
+    """Return cost totals, per-agent breakdown, and per-model breakdown."""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            # Total and per-review average
+            cur.execute(
+                """
+                SELECT
+                    COALESCE(SUM(estimated_cost), 0)       AS total_cost,
+                    COUNT(DISTINCT review_id)              AS reviews_with_cost,
+                    CASE WHEN COUNT(DISTINCT review_id) > 0
+                         THEN SUM(estimated_cost) / COUNT(DISTINCT review_id)
+                         ELSE NULL END                     AS avg_cost_per_review,
+                    COALESCE(SUM(CASE WHEN created_at >= NOW() - INTERVAL '1 day'
+                                     THEN estimated_cost END), 0) AS daily_cost
+                FROM   llm_usage
+                WHERE  estimated_cost IS NOT NULL
+                """
+            )
+            total_row = cur.fetchone()
+
+            # Per-agent breakdown
+            cur.execute(
+                """
+                SELECT agent, COALESCE(SUM(estimated_cost), 0),
+                       COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0)
+                FROM   llm_usage
+                WHERE  estimated_cost IS NOT NULL
+                GROUP BY agent ORDER BY agent
+                """
+            )
+            agent_rows = cur.fetchall()
+
+            # Per-model breakdown
+            cur.execute(
+                """
+                SELECT model, COALESCE(SUM(estimated_cost), 0),
+                       COALESCE(SUM(input_tokens), 0), COALESCE(SUM(output_tokens), 0),
+                       COUNT(*) AS calls
+                FROM   llm_usage
+                WHERE  estimated_cost IS NOT NULL
+                GROUP BY model ORDER BY model
+                """
+            )
+            model_rows = cur.fetchall()
+
+        return {
+            "total_cost_usd":       float(total_row[0]) if total_row else 0.0,
+            "reviews_with_cost":    int(total_row[1]) if total_row else 0,
+            "avg_cost_per_review":  float(total_row[2]) if total_row and total_row[2] else None,
+            "daily_cost_usd":       float(total_row[3]) if total_row else 0.0,
+            "by_agent": [
+                {
+                    "agent":         row[0],
+                    "cost_usd":      float(row[1]),
+                    "input_tokens":  int(row[2]),
+                    "output_tokens": int(row[3]),
+                }
+                for row in agent_rows
+            ],
+            "by_model": [
+                {
+                    "model":         row[0],
+                    "cost_usd":      float(row[1]),
+                    "input_tokens":  int(row[2]),
+                    "output_tokens": int(row[3]),
+                    "calls":         int(row[4]),
+                }
+                for row in model_rows
+            ],
+        }
+    finally:
+        conn.close()
+
+
+def get_percentile_latency(percentile: float, repository: str | None = None) -> float | None:
+    """Return p50/p95/p99 latency in ms across all completed reviews."""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            if repository:
+                cur.execute(
+                    """
+                    SELECT PERCENTILE_CONT(%s) WITHIN GROUP (ORDER BY rm.total_duration_ms)
+                    FROM   review_metrics rm
+                    JOIN   review_runs rr ON rr.id = rm.review_id
+                    WHERE  (rr.owner || '/' || rr.repo) = %s
+                      AND  rm.total_duration_ms IS NOT NULL
+                    """,
+                    (percentile, repository),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT PERCENTILE_CONT(%s) WITHIN GROUP (ORDER BY total_duration_ms)
+                    FROM   review_metrics
+                    WHERE  total_duration_ms IS NOT NULL
+                    """,
+                    (percentile,),
+                )
+            row = cur.fetchone()
+        return float(row[0]) if row and row[0] is not None else None
     finally:
         conn.close()

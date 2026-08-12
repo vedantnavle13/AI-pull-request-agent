@@ -63,3 +63,42 @@ if LANGSMITH_API_KEY:
 else:
     os.environ["LANGSMITH_TRACING"]    = "false"
     os.environ["LANGCHAIN_TRACING_V2"] = "false"
+
+# ---------------------------------------------------------------------------
+# Phase 13 — Autonomous Approval & Auto-Merge
+# ---------------------------------------------------------------------------
+
+# Master safety switch. Must be explicitly set to "true" to enable auto-merge.
+# The system remains fully functional as a review-only bot when False.
+AUTO_MERGE_ENABLED: bool = os.getenv("AUTO_MERGE_ENABLED", "false").lower() == "true"
+
+# Merge strategy: squash (default) | merge | rebase
+_VALID_MERGE_METHODS = {"squash", "merge", "rebase"}
+_raw_merge_method = os.getenv("AUTO_MERGE_METHOD", "squash").lower()
+AUTO_MERGE_METHOD: str = _raw_merge_method if _raw_merge_method in _VALID_MERGE_METHODS else "squash"
+
+# When True, all GitHub CI check-runs must be success/skipped before merge.
+AUTO_MERGE_REQUIRE_CHECKS: bool = os.getenv("AUTO_MERGE_REQUIRE_CHECKS", "true").lower() == "true"
+
+# ---------------------------------------------------------------------------
+# Phase 14 — Observability & Economics
+# ---------------------------------------------------------------------------
+
+# Data retention (documentation only for now — no automatic deletion yet).
+OBSERVABILITY_RETENTION_DAYS: int = int(os.getenv("OBSERVABILITY_RETENTION_DAYS", "90"))
+
+# Centralized LLM pricing — cost per 1 000 tokens (USD).
+# Update here only; never scatter pricing across multiple files.
+# Source: https://ai.google.dev/pricing (verified 2026-08)
+LLM_PRICING: dict[str, dict[str, float]] = {
+    # model-alias               input $/1K   output $/1K
+    "gemini-flash-latest":      {"input": 0.000075, "output": 0.000300},
+    "gemini-2.0-flash":         {"input": 0.000075, "output": 0.000300},
+    "gemini-2.0-flash-lite":    {"input": 0.0000375,"output": 0.000150},
+    "gemini-1.5-flash":         {"input": 0.000075, "output": 0.000300},
+    "gemini-1.5-flash-8b":      {"input": 0.0000375,"output": 0.000150},
+    "gemini-1.5-pro":           {"input": 0.00125,  "output": 0.005000},
+    "gemini-2.5-pro":           {"input": 0.00125,  "output": 0.010000},
+    "gemini-2.5-flash":         {"input": 0.000075, "output": 0.000300},
+    "gemini-3.6-flash":         {"input": 0.000075, "output": 0.000300},
+}

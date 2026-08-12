@@ -166,3 +166,109 @@ class GitHubClient:
         response = requests.post(url, headers=self.headers, json={"body": body}, timeout=30)
         _check_github_response(response)
         return response.json()
+
+    # -----------------------------------------------------------------------
+    # Phase 13 — Auto-Merge methods
+    # -----------------------------------------------------------------------
+
+    def get_pull_request(
+        self,
+        owner: str,
+        repo: str,
+        pr_number: int,
+    ) -> dict:
+        """
+        Fetch the full PR object.
+        Key fields: state, head.sha, mergeable, mergeable_state.
+        """
+        url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}"
+        response = requests.get(url, headers=self.headers, timeout=30)
+        _check_github_response(response)
+        return response.json()
+
+    def get_commit_check_runs(
+        self,
+        owner: str,
+        repo: str,
+        commit_sha: str,
+    ) -> dict:
+        """
+        Fetch GitHub Actions / Status check-runs for a commit SHA.
+        Returns the raw API response dict with `check_runs` list.
+        Each check-run has: name, status, conclusion.
+        """
+        url = f"https://api.github.com/repos/{owner}/{repo}/commits/{commit_sha}/check-runs"
+        response = requests.get(
+            url,
+            headers=self.headers,
+            params={"per_page": 100},
+            timeout=30,
+        )
+        _check_github_response(response)
+        return response.json()
+
+    def merge_pull_request(
+        self,
+        owner: str,
+        repo: str,
+        pr_number: int,
+        expected_sha: str,
+        merge_method: str = "squash",
+        commit_title: str | None = None,
+        commit_message: str | None = None,
+    ) -> dict:
+        """
+        Merge a pull request with full pre-flight safety checks.
+
+        Before calling the merge API:
+          1. Re-fetch current PR to confirm it is still OPEN.
+          2. Confirm current head SHA == expected_sha (HEAD_CHANGED guard).
+          3. Confirm mergeable_state is not 'blocked'.
+
+        Raises:
+          GitHubAPIError(409)        if HEAD has changed.
+          GitHubValidationError      if PR is not open or mergeable_state blocked.
+          GitHubRateLimitError       on 429 (caller should retry).
+          GitHubServerError          on 5xx (caller should retry).
+        """
+        # --- Pre-flight: re-fetch PR state ---
+        pr = self.get_pull_request(owner=owner, repo=repo, pr_number=pr_number)
+
+        if pr.get("state") != "open":
+            raise GitHubValidationError(
+                422,
+                f"PR #{pr_number} is not open (state={pr.get('state')!r}). Aborting merge.",
+            )
+
+        current_sha = pr.get("head", {}).get("sha", "")
+        if current_sha != expected_sha:
+            raise GitHubAPIError(
+                409,
+                f"HEAD changed: expected {expected_sha[:8]!r} but current is {current_sha[:8]!r}.",
+            )
+
+        mergeable_state = pr.get("mergeable_state", "unknown")
+        if mergeable_state == "blocked":
+            raise GitHubValidationError(
+                422,
+                f"PR #{pr_number} mergeable_state is 'blocked'. Branch protection may prevent merge.",
+            )
+
+        # --- Perform merge ---
+        url = f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}/merge"
+        payload: dict = {
+            "sha": expected_sha,
+            "merge_method": merge_method,
+        }
+        if commit_title:
+            payload["commit_title"] = commit_title
+        if commit_message:
+            payload["commit_message"] = commit_message
+
+        logger.info(
+            "[GitHub] Merging PR #%d (%s/%s) SHA=%s method=%s",
+            pr_number, owner, repo, expected_sha[:8], merge_method,
+        )
+        response = requests.put(url, headers=self.headers, json=payload, timeout=30)
+        _check_github_response(response)
+        return response.json()

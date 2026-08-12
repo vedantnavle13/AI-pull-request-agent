@@ -20,6 +20,9 @@ Tests the complete Phase 10 pipeline end-to-end:
 Zero real Gemini API calls.
 Zero real GitHub API calls.
 Zero real git operations.
+
+NOTE: All graph tests use ainvoke() because agent nodes are now async def
+(they use asyncio.to_thread() for true parallel execution).
 """
 
 import os
@@ -71,7 +74,8 @@ def _mock_agent(result: AgentResult) -> MagicMock:
 # Test 1: HIGH finding + PASSED tests → HUMAN_REVIEW
 # ---------------------------------------------------------------------------
 
-def test_integration_high_finding_tests_pass():
+@pytest.mark.anyio
+async def test_integration_high_finding_tests_pass():
     """
     HIGH severity finding + PASSED tests → HUMAN_REVIEW.
     Evidence validator marks the finding as present.
@@ -96,7 +100,7 @@ def test_integration_high_finding_tests_pass():
     ):
         graph = build_review_graph()
 
-        result = graph.invoke({
+        result = await graph.ainvoke({
             "installation_id": 1,
             "owner": "test",
             "repo": "demo",
@@ -117,7 +121,8 @@ def test_integration_high_finding_tests_pass():
 # Test 2: No findings + PASSED tests → APPROVE
 # ---------------------------------------------------------------------------
 
-def test_integration_no_findings_tests_pass():
+@pytest.mark.anyio
+async def test_integration_no_findings_tests_pass():
     """
     No AI findings + PASSED tests → APPROVE.
     """
@@ -132,7 +137,7 @@ def test_integration_no_findings_tests_pass():
     ):
         graph = build_review_graph()
 
-        result = graph.invoke({
+        result = await graph.ainvoke({
             "installation_id": 1,
             "owner": "test",
             "repo": "demo",
@@ -152,7 +157,8 @@ def test_integration_no_findings_tests_pass():
 # Test 3: Tests FAILED → HUMAN_REVIEW regardless of findings
 # ---------------------------------------------------------------------------
 
-def test_integration_tests_fail_escalates():
+@pytest.mark.anyio
+async def test_integration_tests_fail_escalates():
     """
     Tests FAILED → always HUMAN_REVIEW, even with no AI findings.
     """
@@ -167,7 +173,7 @@ def test_integration_tests_fail_escalates():
     ):
         graph = build_review_graph()
 
-        result = graph.invoke({
+        result = await graph.ainvoke({
             "installation_id": 1,
             "owner": "test",
             "repo": "demo",
@@ -186,7 +192,8 @@ def test_integration_tests_fail_escalates():
 # Test 4: No test_results in state (NOT_RUN) + no findings → APPROVE
 # ---------------------------------------------------------------------------
 
-def test_integration_no_tests_no_findings():
+@pytest.mark.anyio
+async def test_integration_no_tests_no_findings():
     """
     No test results + no findings → APPROVE (nothing to block on).
     """
@@ -201,7 +208,7 @@ def test_integration_no_tests_no_findings():
     ):
         graph = build_review_graph()
 
-        result = graph.invoke({
+        result = await graph.ainvoke({
             "installation_id": 1,
             "owner": "test",
             "repo": "demo",
@@ -220,7 +227,8 @@ def test_integration_no_tests_no_findings():
 # Test 5: Invalid finding (file not in PR) → stripped by validator
 # ---------------------------------------------------------------------------
 
-def test_integration_invalid_file_reference_stripped():
+@pytest.mark.anyio
+async def test_integration_invalid_file_reference_stripped():
     """
     AI references a file not in the PR diff — validator strips the finding.
     Validation error is recorded.
@@ -238,7 +246,7 @@ def test_integration_invalid_file_reference_stripped():
     ):
         graph = build_review_graph()
 
-        result = graph.invoke({
+        result = await graph.ainvoke({
             "installation_id": 1,
             "owner": "test",
             "repo": "demo",
