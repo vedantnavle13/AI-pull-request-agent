@@ -1,0 +1,85 @@
+name: Docker Integration
+
+on:
+  pull_request:
+    branches:
+      - main
+  push:
+    branches:
+      - main
+
+jobs:
+  docker-compose:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Create test environment
+        run: |
+          cat > backend/.env <<'EOF'
+          APP_NAME=AI-Pull-Request-Agent
+          DEBUG=false
+          HOST=0.0.0.0
+          PORT=8000
+
+          GITHUB_APP_ID=1
+          GITHUB_PRIVATE_KEY_PATH=/tmp/test-key.pem
+          GEMINI_API_KEY=test-key
+          GITHUB_WEBHOOK_SECRET=test-secret
+
+          DATABASE_URL=postgresql://ai_agent:ai_agent_password@postgres:5432/ai_pull_request_agent
+
+          REDIS_HOST=redis
+          REDIS_PORT=6379
+          REDIS_DB=0
+
+          AUTO_MERGE_ENABLED=false
+          AUTO_MERGE_METHOD=squash
+          AUTO_MERGE_REQUIRE_CHECKS=true
+          EOF
+
+      - name: Start infrastructure
+        run: |
+          docker compose up -d postgres redis
+
+      - name: Wait for infrastructure
+        run: |
+          timeout 60 bash -c '
+            until docker compose exec -T postgres \
+              pg_isready -U ai_agent -d ai_pull_request_agent; do
+              sleep 2
+            done
+          '
+
+          timeout 60 bash -c '
+            until docker compose exec -T redis redis-cli ping | grep -q PONG; do
+              sleep 2
+            done
+          '
+
+      - name: Build backend
+        run: docker compose build api worker
+
+      - name: Start backend
+        run: docker compose up -d api worker
+
+      - name: Wait for API
+        run: |
+          timeout 60 bash -c '
+            until curl -fsS http://localhost:8000/health; do
+              sleep 2
+            done
+          '
+
+      - name: Check readiness
+        run: curl -fsS http://localhost:8000/ready
+
+      - name: Show logs on failure
+        if: failure()
+        run: docker compose logs
+
+      - name: Shutdown
+        if: always()
+        run: docker compose down -v

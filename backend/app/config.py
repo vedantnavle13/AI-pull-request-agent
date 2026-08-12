@@ -15,6 +15,10 @@ DATABASE_URL = os.getenv(
     "postgresql://localhost:5432/ai_pull_request_agent"
 )
 
+REDIS_HOST = os.getenv("REDIS_HOST", "127.0.0.1")
+REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
+REDIS_DB = int(os.getenv("REDIS_DB", "0"))
+
 # ---------------------------------------------------------------------------
 # Phase 12 — Reliability & Sandbox Configuration
 # ---------------------------------------------------------------------------

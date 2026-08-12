@@ -27,6 +27,14 @@ import app.config  # noqa: F401
 from langsmith import traceable
 from arq.connections import RedisSettings
 
+from app.config import (
+    MAX_REVIEW_RETRIES,
+    TEST_TIMEOUT_SECONDS,
+    REDIS_HOST,
+    REDIS_PORT,
+    REDIS_DB,
+)
+
 from app.config import MAX_REVIEW_RETRIES, TEST_TIMEOUT_SECONDS
 from app.github.auth import get_installation_token
 from app.github.client import GitHubClient
@@ -583,4 +591,8 @@ class WorkerSettings:
     on_startup = startup
     on_shutdown = shutdown
     max_tries = MAX_REVIEW_RETRIES
-    redis_settings = RedisSettings(host="127.0.0.1", port=6379)
+    redis_settings = RedisSettings(
+    host=REDIS_HOST,
+    port=REDIS_PORT,
+    database=REDIS_DB,
+)
