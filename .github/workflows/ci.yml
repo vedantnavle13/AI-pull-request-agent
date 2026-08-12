@@ -37,8 +37,8 @@ jobs:
           REDIS_HOST: 127.0.0.1
           REDIS_PORT: 6379
           REDIS_DB: 0
-          GEMINI_API_KEY: test-key
-          GOOGLE_API_KEY: test-key
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GOOGLE_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           AUTO_MERGE_ENABLED: "false"
         run: |
           pytest -q
