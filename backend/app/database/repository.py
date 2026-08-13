@@ -1450,3 +1450,430 @@ def get_percentile_latency(percentile: float, repository: str | None = None) -> 
         return float(row[0]) if row and row[0] is not None else None
     finally:
         conn.close()
+
+
+# ===========================================================================
+# Phase 3 — Multi-user SaaS Repository Functions
+# ===========================================================================
+
+def upsert_user(
+    github_user_id: int,
+    github_username: str,
+    github_avatar_url: str | None = None,
+    email: str | None = None,
+) -> dict:
+    """
+    Insert or update an application user identified by their GitHub user ID.
+
+    Returns the full user row as a dict.
+    Idempotent: safe to call on every OAuth login.
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO users (
+                    github_user_id,
+                    github_username,
+                    github_avatar_url,
+                    email
+                )
+                VALUES (%s, %s, %s, %s)
+                ON CONFLICT (github_user_id)
+                DO UPDATE SET
+                    github_username   = EXCLUDED.github_username,
+                    github_avatar_url = EXCLUDED.github_avatar_url,
+                    email             = COALESCE(EXCLUDED.email, users.email),
+                    updated_at        = NOW()
+                RETURNING id, github_user_id, github_username, github_avatar_url, email,
+                          created_at, updated_at
+                """,
+                (github_user_id, github_username, github_avatar_url, email),
+            )
+            row = cur.fetchone()
+        conn.commit()
+        return {
+            "id":                str(row[0]),
+            "github_user_id":    row[1],
+            "github_username":   row[2],
+            "github_avatar_url": row[3],
+            "email":             row[4],
+            "created_at":        row[5].isoformat() if row[5] else None,
+            "updated_at":        row[6].isoformat() if row[6] else None,
+        }
+    finally:
+        conn.close()
+
+
+def get_user_by_github_id(github_user_id: int) -> dict | None:
+    """Return the application user with the given GitHub user ID, or None."""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, github_user_id, github_username, github_avatar_url, email,
+                       created_at, updated_at
+                FROM   users
+                WHERE  github_user_id = %s
+                """,
+                (github_user_id,),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return None
+        return {
+            "id":                str(row[0]),
+            "github_user_id":    row[1],
+            "github_username":   row[2],
+            "github_avatar_url": row[3],
+            "email":             row[4],
+            "created_at":        row[5].isoformat() if row[5] else None,
+            "updated_at":        row[6].isoformat() if row[6] else None,
+        }
+    finally:
+        conn.close()
+
+
+def get_user_by_id(user_id: str) -> dict | None:
+    """Return an application user by their internal UUID, or None."""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, github_user_id, github_username, github_avatar_url, email,
+                       created_at, updated_at
+                FROM   users
+                WHERE  id = %s
+                """,
+                (user_id,),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return None
+        return {
+            "id":                str(row[0]),
+            "github_user_id":    row[1],
+            "github_username":   row[2],
+            "github_avatar_url": row[3],
+            "email":             row[4],
+            "created_at":        row[5].isoformat() if row[5] else None,
+            "updated_at":        row[6].isoformat() if row[6] else None,
+        }
+    finally:
+        conn.close()
+
+
+def upsert_github_installation(
+    user_id: str,
+    installation_id: int,
+    account_id: int,
+    account_login: str,
+    account_type: str,
+) -> dict:
+    """
+    Insert or update a GitHub App installation for the given user.
+
+    installation_id has a UNIQUE constraint, so if it already exists for
+    *another* user we raise an integrity error (which the caller should handle).
+
+    Returns the full installation row as a dict.
+    Idempotent: safe to call repeatedly with the same installation_id.
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO github_installations (
+                    user_id,
+                    installation_id,
+                    account_id,
+                    account_login,
+                    account_type
+                )
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (installation_id)
+                DO UPDATE SET
+                    account_id    = EXCLUDED.account_id,
+                    account_login = EXCLUDED.account_login,
+                    account_type  = EXCLUDED.account_type,
+                    updated_at    = NOW()
+                RETURNING id, user_id, installation_id, account_id, account_login,
+                          account_type, created_at, updated_at
+                """,
+                (user_id, installation_id, account_id, account_login, account_type),
+            )
+            row = cur.fetchone()
+        conn.commit()
+        return {
+            "id":              str(row[0]),
+            "user_id":         str(row[1]),
+            "installation_id": row[2],
+            "account_id":      row[3],
+            "account_login":   row[4],
+            "account_type":    row[5],
+            "created_at":      row[6].isoformat() if row[6] else None,
+            "updated_at":      row[7].isoformat() if row[7] else None,
+        }
+    finally:
+        conn.close()
+
+
+def get_installation_by_installation_id(installation_id: int) -> dict | None:
+    """
+    Return the github_installations row for the given numeric installation_id.
+
+    Returns None if this installation has not been registered yet (e.g. the
+    webhook arrived before the installation callback was processed).
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, user_id, installation_id, account_id, account_login,
+                       account_type, created_at, updated_at
+                FROM   github_installations
+                WHERE  installation_id = %s
+                """,
+                (installation_id,),
+            )
+            row = cur.fetchone()
+        if row is None:
+            return None
+        return {
+            "id":              str(row[0]),
+            "user_id":         str(row[1]),
+            "installation_id": row[2],
+            "account_id":      row[3],
+            "account_login":   row[4],
+            "account_type":    row[5],
+            "created_at":      row[6].isoformat() if row[6] else None,
+            "updated_at":      row[7].isoformat() if row[7] else None,
+        }
+    finally:
+        conn.close()
+
+
+def get_installations_for_user(user_id: str) -> list[dict]:
+    """Return all GitHub App installations belonging to a user."""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, user_id, installation_id, account_id, account_login,
+                       account_type, created_at, updated_at
+                FROM   github_installations
+                WHERE  user_id = %s
+                ORDER BY created_at DESC
+                """,
+                (user_id,),
+            )
+            rows = cur.fetchall()
+        return [
+            {
+                "id":              str(r[0]),
+                "user_id":         str(r[1]),
+                "installation_id": r[2],
+                "account_id":      r[3],
+                "account_login":   r[4],
+                "account_type":    r[5],
+                "created_at":      r[6].isoformat() if r[6] else None,
+                "updated_at":      r[7].isoformat() if r[7] else None,
+            }
+            for r in rows
+        ]
+    finally:
+        conn.close()
+
+
+def get_user_id_for_installation(installation_id: int) -> str | None:
+    """
+    Given a numeric GitHub installation_id, return the associated user_id UUID.
+    Returns None if the installation is not registered.
+    """
+    inst = get_installation_by_installation_id(installation_id)
+    return inst["user_id"] if inst else None
+
+
+def upsert_repository(
+    installation_uuid: str,
+    github_repo_id: int,
+    owner: str,
+    name: str,
+    full_name: str,
+    private: bool = False,
+    default_branch: str = "main",
+) -> dict:
+    """
+    Insert or update a repository record for a given installation (UUID FK).
+
+    Idempotent: safe to call every time repositories are synced.
+    The UNIQUE constraint is (installation_id, github_repo_id).
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO repositories (
+                    installation_id,
+                    github_repo_id,
+                    owner,
+                    name,
+                    full_name,
+                    private,
+                    default_branch,
+                    active
+                )
+                VALUES (%s, %s, %s, %s, %s, %s, %s, TRUE)
+                ON CONFLICT (installation_id, github_repo_id)
+                DO UPDATE SET
+                    owner          = EXCLUDED.owner,
+                    name           = EXCLUDED.name,
+                    full_name      = EXCLUDED.full_name,
+                    private        = EXCLUDED.private,
+                    default_branch = EXCLUDED.default_branch,
+                    active         = TRUE,
+                    updated_at     = NOW()
+                RETURNING id, installation_id, github_repo_id, owner, name, full_name,
+                          private, default_branch, active, created_at, updated_at
+                """,
+                (
+                    installation_uuid, github_repo_id, owner, name,
+                    full_name, private, default_branch,
+                ),
+            )
+            row = cur.fetchone()
+        conn.commit()
+        return {
+            "id":              str(row[0]),
+            "installation_id": str(row[1]),
+            "github_repo_id":  row[2],
+            "owner":           row[3],
+            "name":            row[4],
+            "full_name":       row[5],
+            "private":         row[6],
+            "default_branch":  row[7],
+            "active":          row[8],
+            "created_at":      row[9].isoformat() if row[9] else None,
+            "updated_at":      row[10].isoformat() if row[10] else None,
+        }
+    finally:
+        conn.close()
+
+
+def get_repositories_for_installation(installation_uuid: str) -> list[dict]:
+    """Return all active repositories for a given installation UUID."""
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT id, installation_id, github_repo_id, owner, name, full_name,
+                       private, default_branch, active, created_at, updated_at
+                FROM   repositories
+                WHERE  installation_id = %s
+                  AND  active = TRUE
+                ORDER BY full_name ASC
+                """,
+                (installation_uuid,),
+            )
+            rows = cur.fetchall()
+        return [
+            {
+                "id":              str(r[0]),
+                "installation_id": str(r[1]),
+                "github_repo_id":  r[2],
+                "owner":           r[3],
+                "name":            r[4],
+                "full_name":       r[5],
+                "private":         r[6],
+                "default_branch":  r[7],
+                "active":          r[8],
+                "created_at":      r[9].isoformat() if r[9] else None,
+                "updated_at":      r[10].isoformat() if r[10] else None,
+            }
+            for r in rows
+        ]
+    finally:
+        conn.close()
+
+
+def get_repositories_for_user(user_id: str) -> list[dict]:
+    """
+    Return all active repositories accessible to a user, joining through
+    their installations.
+
+    The query joins: users → github_installations → repositories.
+    A user can only see their own repositories.
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT r.id, r.installation_id, r.github_repo_id, r.owner, r.name,
+                       r.full_name, r.private, r.default_branch, r.active,
+                       r.created_at, r.updated_at,
+                       gi.account_login, gi.installation_id AS installation_id_int
+                FROM   repositories r
+                JOIN   github_installations gi ON gi.id = r.installation_id
+                WHERE  gi.user_id = %s
+                  AND  r.active = TRUE
+                ORDER BY r.full_name ASC
+                """,
+                (user_id,),
+            )
+            rows = cur.fetchall()
+        return [
+            {
+                "id":              str(r[0]),
+                "installation_id": str(r[1]),
+                "github_repo_id":  r[2],
+                "owner":           r[3],
+                "name":            r[4],
+                "full_name":       r[5],
+                "private":         r[6],
+                "default_branch":  r[7],
+                "active":          r[8],
+                "created_at":      r[9].isoformat() if r[9] else None,
+                "updated_at":      r[10].isoformat() if r[10] else None,
+                "account_login":   r[11],
+                "installation_id_int": r[12],
+            }
+            for r in rows
+        ]
+    finally:
+        conn.close()
+
+
+def verify_repository_belongs_to_user(user_id: str, full_name: str) -> bool:
+    """
+    Return True iff the repository (by full_name e.g. 'owner/repo') is
+    accessible to the given user through at least one of their installations.
+
+    This is the ownership gate for user-facing data access.
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT 1
+                FROM   repositories r
+                JOIN   github_installations gi ON gi.id = r.installation_id
+                WHERE  gi.user_id  = %s
+                  AND  r.full_name = %s
+                  AND  r.active    = TRUE
+                LIMIT 1
+                """,
+                (user_id, full_name),
+            )
+            return cur.fetchone() is not None
+    finally:
+        conn.close()

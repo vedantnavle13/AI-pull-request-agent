@@ -8,19 +8,22 @@ from app.database.repository import (
     claim_review,
     claim_review_run,
     get_review,
+    get_user_id_for_installation,
 )
 from app.utils.logger import get_logger
 from app.api.metrics import router as metrics_router
+from app.api.auth import router as auth_router
 
 logger = get_logger(__name__)
 
 app = FastAPI(
     title="AI Pull Request Review Agent",
-    description="AI-powered code review with full observability (Phase 14)",
-    version="14.0.0",
+    description="AI-powered code review with full observability (Phase 14) + multi-user SaaS (Phase 3)",
+    version="15.0.0",
 )
 
 app.include_router(metrics_router, prefix="/metrics")
+app.include_router(auth_router)  # Phase 3: auth, installation, user endpoints
 
 
 @app.get("/")
@@ -149,6 +152,29 @@ async def webhook(request: Request):
     installation_id = installation["id"]
 
     logger.info("Processing PR #%d on %s (SHA: %s)", pr_number, repository_name, commit_sha[:8])
+
+    # Phase 3 — non-blocking ownership lookup.
+    # We log which user owns this installation for traceability.
+    # We do NOT reject the webhook if the installation is not yet registered
+    # (the installation callback may not have been processed yet).
+    try:
+        user_id = get_user_id_for_installation(installation_id)
+        if user_id:
+            logger.info(
+                "[Phase3] PR #%d installation_id=%d owned by user_id=%s",
+                pr_number, installation_id, user_id,
+            )
+        else:
+            logger.info(
+                "[Phase3] PR #%d installation_id=%d not yet registered in users table — "
+                "proceeding without owner association",
+                pr_number, installation_id,
+            )
+    except Exception as _lookup_exc:
+        logger.warning(
+            "[Phase3] Ownership lookup failed for installation_id=%d: %s",
+            installation_id, _lookup_exc,
+        )
 
     # 9. Claim review in review_runs & legacy reviews table
     # force_new=True for 'opened'/'reopened': always run a fresh review even if

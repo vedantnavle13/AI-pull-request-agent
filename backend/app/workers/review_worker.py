@@ -33,6 +33,8 @@ from app.config import (
     REDIS_HOST,
     REDIS_PORT,
     REDIS_DB,
+    REDIS_PASSWORD,
+    REDIS_SSL,
 )
 
 from app.config import MAX_REVIEW_RETRIES, TEST_TIMEOUT_SECONDS
@@ -591,8 +593,11 @@ class WorkerSettings:
     on_startup = startup
     on_shutdown = shutdown
     max_tries = MAX_REVIEW_RETRIES
+
     redis_settings = RedisSettings(
-    host=REDIS_HOST,
-    port=REDIS_PORT,
-    database=REDIS_DB,
+        host=REDIS_HOST,
+        port=REDIS_PORT,
+        database=REDIS_DB,
+        password=REDIS_PASSWORD,
+        ssl=REDIS_SSL,
 )

@@ -18,6 +18,24 @@ DATABASE_URL = os.getenv(
 REDIS_HOST = os.getenv("REDIS_HOST", "127.0.0.1")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 REDIS_DB = int(os.getenv("REDIS_DB", "0"))
+REDIS_PASSWORD = os.getenv("REDIS_PASSWORD")
+REDIS_SSL = os.getenv("REDIS_SSL", "false").lower() == "true"
+
+# ---------------------------------------------------------------------------
+# Phase 3 — Multi-user SaaS / OAuth
+# ---------------------------------------------------------------------------
+
+# GitHub App OAuth credentials (found in GitHub App settings under "OAuth App Settings").
+# Required for the /auth/github/* login flow.
+GITHUB_CLIENT_ID     = os.getenv("GITHUB_CLIENT_ID", "")
+GITHUB_CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET", "")
+
+# Secret key for signing application session JWTs.
+# Generate with: openssl rand -hex 32
+APP_SECRET_KEY = os.getenv("APP_SECRET_KEY", "change-me-in-production-use-openssl-rand-hex-32")
+
+# Frontend origin used for OAuth redirect URLs.
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
 
 # ---------------------------------------------------------------------------
 # Phase 12 — Reliability & Sandbox Configuration

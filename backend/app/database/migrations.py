@@ -15,6 +15,7 @@ Covered phases:
 - Phase 12: review lifecycle, retries, LLM usage, metrics
 - Phase 13: auto-merge audit trail
 - Phase 14: agent metrics, error metrics, observability
+- Phase 3 (multi-user SaaS): webhook_deliveries, users, github_installations, repositories
 """
 
 import logging
@@ -34,6 +35,7 @@ def ensure_schema() -> None:
     It creates:
         - pgcrypto extension
         - reviews
+        - webhook_deliveries
         - published_comments
         - review_runs
         - llm_usage
@@ -41,6 +43,9 @@ def ensure_schema() -> None:
         - auto_merges
         - agent_metrics
         - error_metrics
+        - users
+        - github_installations
+        - repositories
 
     It also creates the indexes required by the application.
     """
@@ -66,6 +71,8 @@ def ensure_schema() -> None:
             # This table previously existed only in schema.sql.
             # Since schema.sql is not executed by the application,
             # it MUST also be created here for a fresh database.
+            # decision is nullable: the AI sets it after completion.
+            # If a new DB is created from this migration, it must match schema.sql.
             cursor.execute(
                 """
                 CREATE TABLE IF NOT EXISTS reviews (
@@ -73,7 +80,7 @@ def ensure_schema() -> None:
                     repository      VARCHAR(255) NOT NULL,
                     pr_number       INTEGER NOT NULL,
                     commit_sha      VARCHAR(64) NOT NULL,
-                    decision        VARCHAR(50) NOT NULL,
+                    decision        VARCHAR(50),
                     status          VARCHAR(50) NOT NULL DEFAULT 'QUEUED',
                     findings        JSONB,
                     error_message   TEXT,
@@ -84,6 +91,34 @@ def ensure_schema() -> None:
                     github_review_id BIGINT,
 
                     UNIQUE(repository, pr_number, commit_sha)
+                );
+                """
+            )
+
+            # On existing DBs that have decision NOT NULL, relax the constraint
+            # so the worker can insert rows without a decision initially.
+            cursor.execute(
+                """
+                DO $$
+                BEGIN
+                    ALTER TABLE reviews ALTER COLUMN decision DROP NOT NULL;
+                EXCEPTION WHEN others THEN NULL;
+                END
+                $$;
+                """
+            )
+
+            # ---------------------------------------------------------
+            # Webhook delivery idempotency (Phase 3 addition)
+            # ---------------------------------------------------------
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS webhook_deliveries (
+                    id          SERIAL PRIMARY KEY,
+                    delivery_id VARCHAR(255) NOT NULL UNIQUE,
+                    event_type  VARCHAR(100),
+                    action      VARCHAR(100),
+                    created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 );
                 """
             )
@@ -446,6 +481,109 @@ def ensure_schema() -> None:
                 """
             )
 
+            # ---------------------------------------------------------
+            # Phase 3 — Multi-user SaaS tables
+            # ---------------------------------------------------------
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS users (
+                    id                UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+                    github_user_id    BIGINT      NOT NULL UNIQUE,
+                    github_username   TEXT        NOT NULL,
+                    github_avatar_url TEXT,
+                    email             TEXT,
+                    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                """
+            )
+
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS github_installations (
+                    id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+                    user_id         UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    installation_id BIGINT      NOT NULL UNIQUE,
+                    account_id      BIGINT      NOT NULL,
+                    account_login   TEXT        NOT NULL,
+                    account_type    TEXT        NOT NULL,
+                    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                );
+                """
+            )
+
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS repositories (
+                    id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+                    installation_id UUID        NOT NULL
+                                    REFERENCES github_installations(id) ON DELETE CASCADE,
+                    github_repo_id  BIGINT      NOT NULL,
+                    owner           TEXT        NOT NULL,
+                    name            TEXT        NOT NULL,
+                    full_name       TEXT        NOT NULL,
+                    private         BOOLEAN     NOT NULL DEFAULT FALSE,
+                    default_branch  TEXT        NOT NULL DEFAULT 'main',
+                    active          BOOLEAN     NOT NULL DEFAULT TRUE,
+                    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+                    UNIQUE (installation_id, github_repo_id)
+                );
+                """
+            )
+
+            # Indexes — webhook_deliveries
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_created_at
+                ON webhook_deliveries (created_at);
+                """
+            )
+
+            # Indexes — Phase 3 tables
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_users_github_user_id
+                ON users (github_user_id);
+                """
+            )
+
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_github_installations_user_id
+                ON github_installations (user_id);
+                """
+            )
+
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_github_installations_installation_id
+                ON github_installations (installation_id);
+                """
+            )
+
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_repositories_installation_id
+                ON repositories (installation_id);
+                """
+            )
+
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_repositories_full_name
+                ON repositories (full_name);
+                """
+            )
+
+            cursor.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_repositories_github_repo_id
+                ON repositories (github_repo_id);
+                """
+            )
+
         # -------------------------------------------------------------
         # Commit everything atomically
         # -------------------------------------------------------------
@@ -453,7 +591,7 @@ def ensure_schema() -> None:
 
         logger.info(
             "Database schema initialized successfully "
-            "(Phases 11-14)."
+            "(Phases 11-14 + Phase 3 multi-user)."
         )
 
     except Exception as exc:

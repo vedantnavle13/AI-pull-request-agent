@@ -1,9 +1,13 @@
+-- ============================================================
+-- Core reviews table (Phase 1 / legacy)
+-- decision is nullable: set only after AI completes.
+-- ============================================================
 CREATE TABLE IF NOT EXISTS reviews (
     id SERIAL PRIMARY KEY,
     repository VARCHAR(255) NOT NULL,
     pr_number INTEGER NOT NULL,
     commit_sha VARCHAR(64) NOT NULL,
-    decision VARCHAR(50) NOT NULL,
+    decision VARCHAR(50),
     status VARCHAR(50) NOT NULL DEFAULT 'QUEUED',
     findings JSONB,
     error_message TEXT,
@@ -137,3 +141,56 @@ CREATE INDEX IF NOT EXISTS idx_reviews_decision ON reviews (decision);
 CREATE INDEX IF NOT EXISTS idx_review_metrics_created_at ON review_metrics (created_at);
 CREATE INDEX IF NOT EXISTS idx_llm_usage_agent ON llm_usage (agent);
 CREATE INDEX IF NOT EXISTS idx_llm_usage_created_at ON llm_usage (created_at);
+
+-- ============================================================
+-- Phase 3: Multi-user / SaaS tables
+-- ============================================================
+
+-- Application users identified via GitHub OAuth
+CREATE TABLE IF NOT EXISTS users (
+    id                UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    github_user_id    BIGINT      NOT NULL UNIQUE,
+    github_username   TEXT        NOT NULL,
+    github_avatar_url TEXT,
+    email             TEXT,
+    created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_users_github_user_id ON users (github_user_id);
+
+-- GitHub App installations linked to users
+-- installation_id is the numeric ID that GitHub sends in webhooks.
+CREATE TABLE IF NOT EXISTS github_installations (
+    id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id         UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    installation_id BIGINT      NOT NULL UNIQUE,
+    account_id      BIGINT      NOT NULL,
+    account_login   TEXT        NOT NULL,
+    account_type    TEXT        NOT NULL,       -- 'User' or 'Organization'
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_github_installations_user_id        ON github_installations (user_id);
+CREATE INDEX IF NOT EXISTS idx_github_installations_installation_id ON github_installations (installation_id);
+
+-- Repositories accessible to each GitHub App installation
+CREATE TABLE IF NOT EXISTS repositories (
+    id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
+    installation_id UUID        NOT NULL REFERENCES github_installations(id) ON DELETE CASCADE,
+    github_repo_id  BIGINT      NOT NULL,
+    owner           TEXT        NOT NULL,
+    name            TEXT        NOT NULL,
+    full_name       TEXT        NOT NULL,
+    private         BOOLEAN     NOT NULL DEFAULT FALSE,
+    default_branch  TEXT        NOT NULL DEFAULT 'main',
+    active          BOOLEAN     NOT NULL DEFAULT TRUE,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    UNIQUE (installation_id, github_repo_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_repositories_installation_id ON repositories (installation_id);
+CREATE INDEX IF NOT EXISTS idx_repositories_full_name       ON repositories (full_name);
+CREATE INDEX IF NOT EXISTS idx_repositories_github_repo_id  ON repositories (github_repo_id);
