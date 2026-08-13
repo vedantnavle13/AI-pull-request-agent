@@ -15,6 +15,18 @@ CREATE TABLE IF NOT EXISTS reviews (
     UNIQUE(repository, pr_number, commit_sha)
 );
 
+
+CREATE TABLE IF NOT EXISTS webhook_deliveries (
+    id SERIAL PRIMARY KEY,
+    delivery_id VARCHAR(255) NOT NULL UNIQUE,
+    event_type VARCHAR(100),
+    action VARCHAR(100),
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_created_at
+ON webhook_deliveries (created_at);
+
 CREATE TABLE IF NOT EXISTS review_runs (
     id UUID PRIMARY KEY,
     installation_id BIGINT NOT NULL,
