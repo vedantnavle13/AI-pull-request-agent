@@ -149,11 +149,6 @@ def _set_session_cookie(response: Response, token: str) -> None:
         path="/",
     )
 
-    if is_https and "set-cookie" in response.headers:
-        cookie_header = response.headers["set-cookie"]
-        if "partitioned" not in cookie_header.lower():
-            response.headers["set-cookie"] = cookie_header + "; Partitioned"
-
 
 @router.get("/auth/debug/cookie")
 async def debug_cookie(request: Request):
@@ -315,10 +310,6 @@ async def logout(response: Response):
         secure=secure,
         samesite=samesite,
     )
-    if is_https and "set-cookie" in response.headers:
-        cookie_header = response.headers["set-cookie"]
-        if "partitioned" not in cookie_header.lower():
-            response.headers["set-cookie"] = cookie_header + "; Partitioned"
 
     logger.info("[Auth] User logged out, session cookie deleted.")
     return {"status": "logged_out"}

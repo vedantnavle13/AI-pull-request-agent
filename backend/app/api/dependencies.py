@@ -40,18 +40,24 @@ async def get_current_user(
     """
     # 1. Try HttpOnly cookie first (browser sessions)
     token: str | None = request.cookies.get("session")
+    if token:
+        logger.info(
+            "[Auth Dependency] Successfully received session token via Cookie. "
+            "(Path: %s)", request.url.path
+        )
 
     # 2. Fall back to Authorization Bearer header (API / backward-compat)
     if not token and credentials is not None:
         token = credentials.credentials
+        logger.info("[Auth Dependency] Falling back to Bearer token. (Path: %s)", request.url.path)
 
     if not token:
         has_cookies = bool(request.cookies)
         cookie_keys = list(request.cookies.keys())
         logger.warning(
-            "[Auth Dependency] /user/me 401 Unauthorized — missing session token. "
+            "[Auth Dependency] %s 401 Unauthorized — missing session token. "
             "Cookies present: %s (keys: %s), Bearer present: %s",
-            has_cookies, cookie_keys, credentials is not None,
+            request.url.path, has_cookies, cookie_keys, credentials is not None,
         )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
