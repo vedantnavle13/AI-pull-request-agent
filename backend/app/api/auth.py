@@ -124,9 +124,10 @@ def _set_session_cookie(response: Response, token: str) -> None:
     """
     import os
     frontend_url_clean = FRONTEND_URL.rstrip("/")
+    is_render = os.getenv("RENDER") is not None
     is_https = (
         frontend_url_clean.startswith("https://")
-        or os.getenv("RENDER") is not None
+        or is_render
         or os.getenv("ENVIRONMENT") == "production"
     )
 
@@ -134,8 +135,8 @@ def _set_session_cookie(response: Response, token: str) -> None:
     secure = True if is_https else False
 
     logger.info(
-        "[Auth] Setting session cookie: samesite=%s secure=%s frontend_url=%s",
-        samesite, secure, frontend_url_clean,
+        "[Auth Cookie Diagnostic] Emitting session cookie: samesite=%s secure=%s httponly=True path=/ is_https=%s is_render=%s frontend_url=%s",
+        samesite, secure, is_https, is_render, frontend_url_clean,
     )
 
     response.set_cookie(
@@ -152,6 +153,20 @@ def _set_session_cookie(response: Response, token: str) -> None:
         cookie_header = response.headers["set-cookie"]
         if "partitioned" not in cookie_header.lower():
             response.headers["set-cookie"] = cookie_header + "; Partitioned"
+
+
+@router.get("/auth/debug/cookie")
+async def debug_cookie(request: Request):
+    """
+    Safe diagnostic endpoint — checks whether session cookie was received by backend.
+    NEVER returns actual cookie token values or secrets.
+    """
+    has_session = "session" in request.cookies
+    cookie_names = list(request.cookies.keys())
+    return {
+        "has_session_cookie": has_session,
+        "cookie_names": cookie_names,
+    }
 
 
 # ---------------------------------------------------------------------------
