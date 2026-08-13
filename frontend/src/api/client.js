@@ -1,9 +1,5 @@
 const rawApiUrl = import.meta.env.VITE_API_URL;
-export const API_URL = (rawApiUrl && rawApiUrl !== 'undefined' && rawApiUrl.trim() !== '')
-  ? rawApiUrl.replace(/\/+$/, '')
-  : (typeof window !== 'undefined' && window.location.hostname.includes('onrender.com')
-      ? 'https://ai-pull-request-agent-api.onrender.com'
-      : 'http://localhost:8000');
+export const API_URL = '/api';
 
 export async function apiFetch(endpoint, options = {}) {
   const url = endpoint.startsWith('http') ? endpoint : `${API_URL}${endpoint}`;

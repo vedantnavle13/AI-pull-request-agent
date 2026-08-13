@@ -131,7 +131,9 @@ def _set_session_cookie(response: Response, token: str) -> None:
         or os.getenv("ENVIRONMENT") == "production"
     )
 
-    samesite = "none" if is_https else "lax"
+    # With the same-origin proxy architecture, the API runs on the same domain as the frontend.
+    # We use SameSite='lax' for both local dev and production for optimal security.
+    samesite = "lax"
     secure = True if is_https else False
 
     logger.info(
@@ -300,7 +302,9 @@ async def logout(response: Response):
         or os.getenv("RENDER") is not None
         or os.getenv("ENVIRONMENT") == "production"
     )
-    samesite = "none" if is_https else "lax"
+    
+    # Must perfectly match the attributes used when setting the cookie
+    samesite = "lax"
     secure = True if is_https else False
 
     response.delete_cookie(
