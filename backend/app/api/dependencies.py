@@ -2,13 +2,16 @@
 FastAPI dependencies — Phase 3 multi-user SaaS.
 
 Provides the get_current_user dependency that all authenticated endpoints use.
-Clients must pass a session token in the Authorization header:
 
-    Authorization: Bearer <session_token>
+Clients may authenticate via:
+  1. HttpOnly cookie:       Cookie: session=<jwt>   (preferred for browser clients)
+  2. Authorization header:  Authorization: Bearer <jwt>  (backward-compatible for API clients)
+
+Cookie auth is checked first; Bearer is the fallback.
 """
 
 import jwt
-from fastapi import Depends, HTTPException, status
+from fastapi import Cookie, Depends, HTTPException, Request, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 from app.utils.tokens import decode_session_token
@@ -21,23 +24,35 @@ _bearer = HTTPBearer(auto_error=False)
 
 
 async def get_current_user(
+    request: Request,
     credentials: HTTPAuthorizationCredentials | None = Depends(_bearer),
 ) -> dict:
     """
-    FastAPI dependency: validates the Bearer session token and returns the
+    FastAPI dependency: validates the session token and returns the
     application user dict.
+
+    Resolution order:
+      1. Cookie: session=<jwt>
+      2. Authorization: Bearer <jwt>
 
     Raises HTTP 401 if the token is missing, expired, or invalid.
     Raises HTTP 401 if the user no longer exists in the database.
     """
-    if credentials is None:
+    # 1. Try HttpOnly cookie first (browser sessions)
+    token: str | None = request.cookies.get("session")
+
+    # 2. Fall back to Authorization Bearer header (API / backward-compat)
+    if not token and credentials is not None:
+        token = credentials.credentials
+
+    if not token:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authentication required. Include 'Authorization: Bearer <token>' header.",
+            detail="Authentication required. Provide a session cookie or Authorization: Bearer header.",
         )
 
     try:
-        payload = decode_session_token(credentials.credentials)
+        payload = decode_session_token(token)
     except jwt.ExpiredSignatureError:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

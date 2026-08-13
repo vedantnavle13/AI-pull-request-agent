@@ -30,12 +30,23 @@ REDIS_SSL = os.getenv("REDIS_SSL", "false").lower() == "true"
 GITHUB_CLIENT_ID     = os.getenv("GITHUB_CLIENT_ID", "")
 GITHUB_CLIENT_SECRET = os.getenv("GITHUB_CLIENT_SECRET", "")
 
+# GitHub App slug — used to build the installation URL:
+#   https://github.com/apps/<slug>/installations/new
+# Confirmed from GET /app API: slug = 'aipullrequestagent'
+GITHUB_APP_SLUG = os.getenv("GITHUB_APP_SLUG", "aipullrequestagent")
+
 # Secret key for signing application session JWTs.
 # Generate with: openssl rand -hex 32
 APP_SECRET_KEY = os.getenv("APP_SECRET_KEY", "change-me-in-production-use-openssl-rand-hex-32")
 
 # Frontend origin used for OAuth redirect URLs.
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+
+# Name of the HttpOnly session cookie set after OAuth login.
+SESSION_COOKIE_NAME = "session"
+
+# Session cookie max age in seconds (7 days, matching JWT TTL).
+SESSION_COOKIE_MAX_AGE = 60 * 60 * 24 * 7
 
 # ---------------------------------------------------------------------------
 # Phase 12 — Reliability & Sandbox Configuration

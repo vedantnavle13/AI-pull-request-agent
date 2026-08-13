@@ -564,3 +564,30 @@ def test_sync_installation_repositories_idempotent():
     assert len(second_sync) == 2
     # upsert was called 4 times total (2 per sync)
     assert upsert_mock.call_count == 4
+
+
+def test_get_reviews_for_user():
+    """get_reviews_for_user queries review_runs joined through github_installations."""
+    user_id = str(uuid.uuid4())
+    now = datetime.now(timezone.utc)
+    review_row = (
+        str(uuid.uuid4()), 11111, "alice", "my-repo", 10, "sha123",
+        "COMPLETED", 1, now, now, now, now, None, None,
+    )
+
+    with patch("app.database.repository.get_connection") as mock_gc:
+        cursor = MagicMock()
+        cursor.fetchall.return_value = [review_row]
+        conn = MagicMock()
+        conn.cursor.return_value.__enter__.return_value = cursor
+        mock_gc.return_value = conn
+
+        from app.database.repository import get_reviews_for_user
+
+        reviews = get_reviews_for_user(user_id)
+
+    assert len(reviews) == 1
+    assert reviews[0]["full_name"] == "alice/my-repo"
+    assert reviews[0]["pr_number"] == 10
+    assert reviews[0]["status"] == "COMPLETED"
+

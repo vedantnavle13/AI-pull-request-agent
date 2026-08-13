@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Request, Response, status
-from app.config import GITHUB_WEBHOOK_SECRET
+from fastapi.middleware.cors import CORSMiddleware
+from app.config import GITHUB_WEBHOOK_SECRET, FRONTEND_URL
 from app.queue import get_redis
 from app.github.validator import verify_signature
 from app.database.postgres import get_connection
@@ -18,12 +19,25 @@ logger = get_logger(__name__)
 
 app = FastAPI(
     title="AI Pull Request Review Agent",
-    description="AI-powered code review with full observability (Phase 14) + multi-user SaaS (Phase 3)",
-    version="15.0.0",
+    description="AI-powered code review with full observability (Phase 14) + multi-user SaaS (Phase 3/4)",
+    version="15.1.0",
+)
+
+# ---------------------------------------------------------------------------
+# CORS — required for browser clients (frontend → backend cross-origin calls)
+# Allow the FRONTEND_URL origin with credentials (for HttpOnly cookie auth).
+# Never use wildcard origin with allow_credentials=True.
+# ---------------------------------------------------------------------------
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[FRONTEND_URL, "http://localhost:3000", "http://localhost:5173"],
+    allow_credentials=True,
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "Accept"],
 )
 
 app.include_router(metrics_router, prefix="/metrics")
-app.include_router(auth_router)  # Phase 3: auth, installation, user endpoints
+app.include_router(auth_router)  # Phase 3/4: auth, installation, user endpoints
 
 
 @app.get("/")

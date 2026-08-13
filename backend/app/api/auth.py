@@ -1,38 +1,44 @@
 """
-Authentication & installation API endpoints — Phase 3 multi-user SaaS.
+Authentication & installation API endpoints — Phase 3/4 multi-user SaaS.
 
 Endpoints:
   GET  /auth/github/login                    Redirect to GitHub OAuth
-  GET  /auth/github/callback                 GitHub OAuth callback → session token
+  GET  /auth/github/callback                 GitHub OAuth callback → sets HttpOnly cookie → redirect to frontend
+  GET  /auth/github/app-info                 Returns public app slug for frontend Install button
+  POST /auth/logout                          Clears session cookie
   GET  /github/callback/installation         GitHub App installation callback
   GET  /user/me                              Current user profile
   GET  /user/installations                   Current user's GitHub installations
   GET  /user/repositories                    Current user's repositories
+  GET  /user/reviews                         Current user's recent review_runs
 
-OAuth flow:
+OAuth flow (browser):
   1.  User visits /auth/github/login  → redirected to GitHub.
   2.  GitHub redirects back to /auth/github/callback?code=...&state=...
   3.  We exchange 'code' for a GitHub access token.
   4.  We fetch the user's GitHub profile and create/update them in our DB.
-  5.  We issue a signed session JWT and return it.
+  5.  We issue a signed session JWT, set it as an HttpOnly cookie.
+  6.  We redirect to FRONTEND_URL/dashboard.
+  7.  Browser calls /user/me with the cookie on every page load.
 
-Installation flow (when user also installs the GitHub App at the same time):
-  GitHub can be configured to redirect to /github/callback/installation after
-  the App installation completes. The query string will contain:
-      installation_id=<int>&setup_action=install&code=<oauth_code>
-  We handle both the OAuth code (log the user in) and the installation ID
-  (associate it with the user and sync repositories) in one request.
+Installation flow:
+  GitHub redirects to /github/callback/installation after App installation.
+  If "Request user authorization" is enabled in the App settings, GitHub
+  sends both installation_id and a code.  We handle both in one request.
 """
 
 import secrets
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import RedirectResponse, JSONResponse
 
 from app.config import (
     FRONTEND_URL,
     GITHUB_CLIENT_ID,
     GITHUB_CLIENT_SECRET,
+    GITHUB_APP_SLUG,
+    SESSION_COOKIE_NAME,
+    SESSION_COOKIE_MAX_AGE,
 )
 from app.github.oauth import (
     exchange_code_for_token,
@@ -49,6 +55,7 @@ from app.database.repository import (
     get_installation_by_installation_id,
     get_installations_for_user,
     get_repositories_for_user,
+    get_reviews_for_user,
     upsert_repository,
 )
 from app.utils.tokens import create_session_token
@@ -62,18 +69,13 @@ router = APIRouter(tags=["auth"])
 # ---------------------------------------------------------------------------
 # OAuth state store (in-memory; replace with Redis for production scale)
 # ---------------------------------------------------------------------------
-# Maps state token → metadata dict (e.g. pending_installation_id).
-# State tokens are single-use and short-lived — this in-memory dict is
-# acceptable for a single-process deployment. A multi-process/Gunicorn
-# deployment should use Redis for this.
 _STATE_STORE: dict[str, dict] = {}
-_MAX_STATES = 500  # Prevent unbounded growth
+_MAX_STATES = 500
 
 
 def _generate_state(metadata: dict | None = None) -> str:
     state = secrets.token_urlsafe(32)
     if len(_STATE_STORE) >= _MAX_STATES:
-        # Evict oldest entry to prevent unbounded growth
         oldest = next(iter(_STATE_STORE))
         del _STATE_STORE[oldest]
     _STATE_STORE[state] = metadata or {}
@@ -109,6 +111,27 @@ def _build_github_oauth_url(state: str, scope: str = "read:user,user:email") -> 
     )
 
 
+def _set_session_cookie(response: Response, token: str) -> None:
+    """
+    Set the HttpOnly session cookie on any response object.
+
+    Secure=True is only set when the request is served over HTTPS
+    (i.e., not local development). We use SameSite=Lax so the cookie
+    is sent on top-level cross-site navigations (OAuth redirect) but
+    not on cross-site sub-requests.
+    """
+    is_production = FRONTEND_URL.startswith("https://")
+    response.set_cookie(
+        key=SESSION_COOKIE_NAME,
+        value=token,
+        max_age=SESSION_COOKIE_MAX_AGE,
+        httponly=True,
+        secure=is_production,
+        samesite="lax",
+        path="/",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -119,17 +142,12 @@ async def github_login(
 ):
     """
     Initiate GitHub OAuth login.
-
     Redirects the user's browser to GitHub's authorization page.
-    If installation_id is provided, it will be remembered in the state and
-    associated with the user after they log in.
     """
     _check_oauth_configured()
-
     metadata: dict = {}
     if installation_id is not None:
         metadata["pending_installation_id"] = installation_id
-
     state = _generate_state(metadata)
     return RedirectResponse(url=_build_github_oauth_url(state))
 
@@ -144,20 +162,21 @@ async def github_callback(
     """
     GitHub OAuth callback endpoint.
 
-    GitHub redirects here after the user authorizes (or denies) the OAuth request.
-    On success, exchanges the code for a token, upserts the user, and returns a
-    session JWT.
+    On success:
+      - Exchanges the code for a GitHub token
+      - Upserts the user in our database
+      - Issues a session JWT
+      - Sets it as an HttpOnly cookie
+      - Redirects to FRONTEND_URL/dashboard
     """
     _check_oauth_configured()
 
     # 1. Handle user denial
     if error:
         logger.warning("GitHub OAuth error: %s — %s", error, error_description)
-        return RedirectResponse(
-            url=f"{FRONTEND_URL}/auth/error?reason={error}",
-        )
+        return RedirectResponse(url=f"{FRONTEND_URL}/auth/error?reason={error}")
 
-    # 2. Verify and consume state
+    # 2. Verify and consume CSRF state
     state_data = _consume_state(state)
     if state_data is None:
         raise HTTPException(
@@ -165,7 +184,7 @@ async def github_callback(
             detail="Invalid or expired OAuth state. Please start the login flow again.",
         )
 
-    # 3. Exchange code → access token
+    # 3. Exchange code → GitHub access token
     try:
         github_token = exchange_code_for_token(
             code=code,
@@ -189,7 +208,7 @@ async def github_callback(
             detail="Failed to retrieve GitHub user profile.",
         )
 
-    # 5. Optionally fetch verified email (best-effort)
+    # 5. Fetch verified email (best-effort)
     try:
         email = get_primary_email(github_token)
     except Exception:
@@ -207,7 +226,7 @@ async def github_callback(
         user["github_username"], user["id"], user["github_user_id"],
     )
 
-    # 7. If there was a pending installation_id in the state, associate it
+    # 7. Handle pending installation from state
     pending_installation_id = state_data.get("pending_installation_id")
     if pending_installation_id:
         await _associate_installation(
@@ -215,7 +234,7 @@ async def github_callback(
             installation_id=pending_installation_id,
         )
 
-    # 8. Issue session token
+    # 8. Issue session JWT
     session_token = create_session_token(
         user_id=user["id"],
         extra_claims={
@@ -224,18 +243,38 @@ async def github_callback(
         },
     )
 
-    return JSONResponse(
-        content={
-            "token":    session_token,
-            "token_type": "Bearer",
-            "user": {
-                "id":                user["id"],
-                "github_username":   user["github_username"],
-                "github_avatar_url": user["github_avatar_url"],
-                "email":             user["email"],
-            },
-        }
+    # 9. Set HttpOnly cookie + redirect to frontend dashboard
+    redirect = RedirectResponse(url=f"{FRONTEND_URL}/dashboard", status_code=302)
+    _set_session_cookie(redirect, session_token)
+    return redirect
+
+
+@router.post("/auth/logout")
+async def logout(response: Response):
+    """
+    Logout endpoint — clears the session cookie.
+
+    The frontend should call this, then redirect to / or /login.
+    """
+    response.delete_cookie(
+        key=SESSION_COOKIE_NAME,
+        path="/",
+        httponly=True,
     )
+    return {"status": "logged_out"}
+
+
+@router.get("/auth/github/app-info")
+async def github_app_info():
+    """
+    Return public information about the GitHub App.
+    Used by the frontend to build the Install GitHub App button URL.
+    No authentication required — this is public metadata.
+    """
+    return {
+        "slug": GITHUB_APP_SLUG,
+        "install_url": f"https://github.com/apps/{GITHUB_APP_SLUG}/installations/new",
+    }
 
 
 @router.get("/github/callback/installation")
@@ -249,14 +288,8 @@ async def github_installation_callback(
     GitHub App installation callback.
 
     GitHub redirects here after a user installs (or updates) the GitHub App.
-    Query parameters provided by GitHub:
-        installation_id: numeric ID of the installation
-        setup_action:    'install' | 'update' | 'delete'
-        code:            OAuth code (only if 'Request user authorization' is enabled in App settings)
-
     If 'code' is present, we log the user in immediately and associate the
-    installation. Otherwise, we redirect to the login flow with the
-    installation_id embedded in the state.
+    installation. Otherwise, we redirect through the login flow.
     """
     _check_oauth_configured()
 
@@ -266,13 +299,10 @@ async def github_installation_callback(
     )
 
     if setup_action == "delete":
-        # Uninstallation is handled via webhook (installation event).
-        # For now just return a success response.
         return JSONResponse({"status": "uninstalled", "installation_id": installation_id})
 
-    # If we have an OAuth code, we can log the user in immediately
+    # If we have an OAuth code, log the user in immediately
     if code:
-        _check_oauth_configured()
         try:
             github_token = exchange_code_for_token(
                 code=code,
@@ -283,9 +313,8 @@ async def github_installation_callback(
             email = get_primary_email(github_token)
         except Exception as exc:
             logger.error("Installation callback token exchange failed: %s", exc)
-            # Fall through to redirect flow
-            state = _generate_state({"pending_installation_id": installation_id})
-            return RedirectResponse(url=_build_github_oauth_url(state))
+            state_token = _generate_state({"pending_installation_id": installation_id})
+            return RedirectResponse(url=_build_github_oauth_url(state_token))
 
         user = upsert_user(
             github_user_id=gh_user["id"],
@@ -307,10 +336,9 @@ async def github_installation_callback(
             },
         )
 
-        # Redirect to frontend with token in fragment (avoids server logs)
-        return RedirectResponse(
-            url=f"{FRONTEND_URL}/auth/success#token={session_token}"
-        )
+        redirect = RedirectResponse(url=f"{FRONTEND_URL}/dashboard?installation=success", status_code=302)
+        _set_session_cookie(redirect, session_token)
+        return redirect
 
     # No OAuth code — redirect through the login flow
     state_token = _generate_state({"pending_installation_id": installation_id})
@@ -320,10 +348,9 @@ async def github_installation_callback(
 async def _associate_installation(user_id: str, installation_id: int) -> None:
     """
     Fetch installation metadata from GitHub, save it to the DB,
-    and sync repositories.  Best-effort — errors are logged, not raised.
+    and sync repositories. Best-effort — errors are logged, not raised.
     """
     try:
-        # Fetch installation info from GitHub App API
         inst_info = _fetch_installation_info(installation_id)
         account = inst_info.get("account", {})
 
@@ -341,7 +368,6 @@ async def _associate_installation(user_id: str, installation_id: int) -> None:
             installation_id, user_id,
         )
 
-        # Sync repositories
         synced = sync_installation_repositories(
             installation_id=installation_id,
             installation_uuid=installation_uuid,
@@ -386,9 +412,27 @@ async def list_installations(current_user: dict = Depends(get_current_user)):
 async def list_repositories(current_user: dict = Depends(get_current_user)):
     """
     Return all repositories accessible to the current user.
-
     Only repositories from the user's own installations are returned.
-    A user cannot see another user's repositories.
     """
     repos = get_repositories_for_user(user_id=current_user["id"])
     return {"repositories": repos}
+
+
+@router.get("/user/reviews")
+async def list_user_reviews(
+    repository: str | None = Query(None, description="Filter by owner/repo"),
+    limit: int = Query(50, ge=1, le=200),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Return recent review_runs for the authenticated user's repositories.
+
+    Ownership is enforced at the SQL level via the github_installations join.
+    Optionally filter to a single repository with ?repository=owner/repo.
+    """
+    reviews = get_reviews_for_user(
+        user_id=current_user["id"],
+        limit=limit,
+        full_name=repository,
+    )
+    return {"reviews": reviews}

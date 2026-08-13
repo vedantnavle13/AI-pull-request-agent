@@ -1877,3 +1877,81 @@ def verify_repository_belongs_to_user(user_id: str, full_name: str) -> bool:
             return cur.fetchone() is not None
     finally:
         conn.close()
+
+
+def get_reviews_for_user(
+    user_id: str,
+    limit: int = 50,
+    full_name: str | None = None,
+) -> list[dict]:
+    """
+    Return recent review_runs for all repositories owned by the user.
+
+    Joins: github_installations → review_runs using installation_id (int).
+    Optionally filtered to a single repository by full_name.
+
+    Ownership is enforced at the SQL level — a user can only see rows
+    belonging to their own installations.
+
+    Returns a list of dicts with review_run fields plus full_name.
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            params: list = [user_id]
+            repo_filter = ""
+            if full_name:
+                repo_filter = "AND (rr.owner || '/' || rr.repo) = %s"
+                params.append(full_name)
+            params.append(limit)
+
+            cur.execute(
+                f"""
+                SELECT
+                    rr.id,
+                    rr.installation_id,
+                    rr.owner,
+                    rr.repo,
+                    rr.pr_number,
+                    rr.commit_sha,
+                    rr.status,
+                    rr.attempt_count,
+                    rr.created_at,
+                    rr.started_at,
+                    rr.completed_at,
+                    rr.updated_at,
+                    rr.error_type,
+                    rr.error_message
+                FROM   review_runs rr
+                JOIN   github_installations gi
+                       ON gi.installation_id = rr.installation_id
+                WHERE  gi.user_id = %s
+                {repo_filter}
+                ORDER BY rr.created_at DESC
+                LIMIT  %s
+                """,
+                params,
+            )
+            rows = cur.fetchall()
+        return [
+            {
+                "id":              str(r[0]),
+                "installation_id": r[1],
+                "owner":           r[2],
+                "repo":            r[3],
+                "full_name":       f"{r[2]}/{r[3]}",
+                "pr_number":       r[4],
+                "commit_sha":      r[5],
+                "status":          r[6],
+                "attempt_count":   r[7],
+                "created_at":      r[8].isoformat() if r[8] else None,
+                "started_at":      r[9].isoformat() if r[9] else None,
+                "completed_at":    r[10].isoformat() if r[10] else None,
+                "updated_at":      r[11].isoformat() if r[11] else None,
+                "error_type":      r[12],
+                "error_message":   r[13],
+            }
+            for r in rows
+        ]
+    finally:
+        conn.close()
