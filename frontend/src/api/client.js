@@ -1,4 +1,9 @@
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
+const rawApiUrl = import.meta.env.VITE_API_URL;
+export const API_URL = (rawApiUrl && rawApiUrl !== 'undefined' && rawApiUrl.trim() !== '')
+  ? rawApiUrl.replace(/\/+$/, '')
+  : (typeof window !== 'undefined' && window.location.hostname.includes('onrender.com')
+      ? 'https://ai-pull-request-agent-api.onrender.com'
+      : 'http://localhost:8000');
 
 export async function apiFetch(endpoint, options = {}) {
   const url = endpoint.startsWith('http') ? endpoint : `${API_URL}${endpoint}`;
@@ -27,10 +32,10 @@ export async function apiFetch(endpoint, options = {}) {
 
     // Handle 401 Unauthorized globally if needed or pass back to caller
     if (response.status === 401) {
-      // Unauthenticated response
       const data = await response.json().catch(() => ({}));
       const error = new Error(data.detail || 'Unauthorized');
       error.status = 401;
+      error.data = data;
       throw error;
     }
 

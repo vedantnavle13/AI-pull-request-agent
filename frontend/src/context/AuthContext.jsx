@@ -1,9 +1,7 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
-import { apiFetch } from '../api/client';
+import { apiFetch, API_URL } from '../api/client';
 
 const AuthContext = createContext(null);
-
-const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
 export function AuthProvider({ children }) {
   const [user, setUser] = useState(null);
@@ -13,12 +11,16 @@ export function AuthProvider({ children }) {
   const refreshUser = async () => {
     try {
       setLoading(true);
-      console.log('[AuthContext] Requesting GET /user/me from API:', API_URL);
+      console.log('[AuthContext] Checking /user/me');
       const data = await apiFetch('/user/me');
-      console.log('[AuthContext] GET /user/me success. Authenticated user:', data?.github_username);
+      console.log('[AuthContext] /user/me status: 200 OK — authenticated as @', data?.github_username);
       setUser(data);
     } catch (err) {
-      console.warn('[AuthContext] GET /user/me failed:', err.status, err.message);
+      const status = err.status || (err.message && err.message.includes('401') ? 401 : 'unknown');
+      console.log('[AuthContext] /user/me status:', status);
+      if (status === 401) {
+        console.log('[AuthContext] /user/me 401 — session cookie not accepted or user unauthenticated');
+      }
       setUser(null);
     } finally {
       setLoading(false);
@@ -40,9 +42,12 @@ export function AuthProvider({ children }) {
   }, []);
 
   const login = () => {
-    const targetUrl = `${API_URL}/auth/github/login`;
-    console.log('[AuthContext] Initiating browser redirect to:', targetUrl);
-    window.location.href = targetUrl;
+    const oauthUrl = `${API_URL}/auth/github/login`;
+    console.log('[Login] GitHub login clicked');
+    console.log('[Login] API URL:', import.meta.env.VITE_API_URL);
+    console.log('[Login] Resolved API URL:', API_URL);
+    console.log('[Login] OAuth URL:', oauthUrl);
+    window.location.assign(oauthUrl);
   };
 
   const logout = async () => {
