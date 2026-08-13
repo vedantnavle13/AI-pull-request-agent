@@ -122,8 +122,13 @@ def _set_session_cookie(response: Response, token: str) -> None:
     For local HTTP development (http://localhost:3000), SameSite='lax' and Secure=False
     is used because browsers reject SameSite=None without Secure over plain HTTP.
     """
+    import os
     frontend_url_clean = FRONTEND_URL.rstrip("/")
-    is_https = frontend_url_clean.startswith("https://")
+    is_https = (
+        frontend_url_clean.startswith("https://")
+        or os.getenv("RENDER") is not None
+        or os.getenv("ENVIRONMENT") == "production"
+    )
 
     samesite = "none" if is_https else "lax"
     secure = True if is_https else False
@@ -142,6 +147,11 @@ def _set_session_cookie(response: Response, token: str) -> None:
         samesite=samesite,
         path="/",
     )
+
+    if is_https and "set-cookie" in response.headers:
+        cookie_header = response.headers["set-cookie"]
+        if "partitioned" not in cookie_header.lower():
+            response.headers["set-cookie"] = cookie_header + "; Partitioned"
 
 
 # ---------------------------------------------------------------------------
@@ -273,8 +283,13 @@ async def logout(response: Response):
     Logout endpoint — clears the session cookie.
     Must match samesite and secure attributes used when setting the cookie.
     """
+    import os
     frontend_url_clean = FRONTEND_URL.rstrip("/")
-    is_https = frontend_url_clean.startswith("https://")
+    is_https = (
+        frontend_url_clean.startswith("https://")
+        or os.getenv("RENDER") is not None
+        or os.getenv("ENVIRONMENT") == "production"
+    )
     samesite = "none" if is_https else "lax"
     secure = True if is_https else False
 
@@ -285,6 +300,11 @@ async def logout(response: Response):
         secure=secure,
         samesite=samesite,
     )
+    if is_https and "set-cookie" in response.headers:
+        cookie_header = response.headers["set-cookie"]
+        if "partitioned" not in cookie_header.lower():
+            response.headers["set-cookie"] = cookie_header + "; Partitioned"
+
     logger.info("[Auth] User logged out, session cookie deleted.")
     return {"status": "logged_out"}
 
