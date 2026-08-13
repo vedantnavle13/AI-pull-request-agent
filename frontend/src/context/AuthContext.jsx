@@ -13,9 +13,12 @@ export function AuthProvider({ children }) {
   const refreshUser = async () => {
     try {
       setLoading(true);
+      console.log('[AuthContext] Requesting GET /user/me from API:', API_URL);
       const data = await apiFetch('/user/me');
+      console.log('[AuthContext] GET /user/me success. Authenticated user:', data?.github_username);
       setUser(data);
     } catch (err) {
+      console.warn('[AuthContext] GET /user/me failed:', err.status, err.message);
       setUser(null);
     } finally {
       setLoading(false);
@@ -37,7 +40,9 @@ export function AuthProvider({ children }) {
   }, []);
 
   const login = () => {
-    window.location.href = `${API_URL}/auth/github/login`;
+    const targetUrl = `${API_URL}/auth/github/login`;
+    console.log('[AuthContext] Initiating browser redirect to:', targetUrl);
+    window.location.href = targetUrl;
   };
 
   const logout = async () => {

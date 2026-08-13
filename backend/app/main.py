@@ -28,9 +28,18 @@ app = FastAPI(
 # Allow the FRONTEND_URL origin with credentials (for HttpOnly cookie auth).
 # Never use wildcard origin with allow_credentials=True.
 # ---------------------------------------------------------------------------
+frontend_origin = FRONTEND_URL.rstrip("/")
+cors_origins = list({
+    frontend_origin,
+    "https://ai-pull-request-agent.onrender.com",
+    "http://localhost:3000",
+    "http://localhost:5173",
+    "http://127.0.0.1:3000",
+})
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[FRONTEND_URL, "http://localhost:3000", "http://localhost:5173"],
+    allow_origins=cors_origins,
     allow_credentials=True,
     allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type", "Accept"],

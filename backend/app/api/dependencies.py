@@ -46,6 +46,13 @@ async def get_current_user(
         token = credentials.credentials
 
     if not token:
+        has_cookies = bool(request.cookies)
+        cookie_keys = list(request.cookies.keys())
+        logger.warning(
+            "[Auth Dependency] /user/me 401 Unauthorized — missing session token. "
+            "Cookies present: %s (keys: %s), Bearer present: %s",
+            has_cookies, cookie_keys, credentials is not None,
+        )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication required. Provide a session cookie or Authorization: Bearer header.",

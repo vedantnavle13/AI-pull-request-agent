@@ -115,19 +115,31 @@ def _set_session_cookie(response: Response, token: str) -> None:
     """
     Set the HttpOnly session cookie on any response object.
 
-    Secure=True is only set when the request is served over HTTPS
-    (i.e., not local development). We use SameSite=Lax so the cookie
-    is sent on top-level cross-site navigations (OAuth redirect) but
-    not on cross-site sub-requests.
+    For cross-site production HTTPS (frontend on ai-pull-request-agent.onrender.com
+    and backend on ai-pull-request-agent-api.onrender.com), SameSite MUST be 'none'
+    and Secure MUST be True.
+
+    For local HTTP development (http://localhost:3000), SameSite='lax' and Secure=False
+    is used because browsers reject SameSite=None without Secure over plain HTTP.
     """
-    is_production = FRONTEND_URL.startswith("https://")
+    frontend_url_clean = FRONTEND_URL.rstrip("/")
+    is_https = frontend_url_clean.startswith("https://")
+
+    samesite = "none" if is_https else "lax"
+    secure = True if is_https else False
+
+    logger.info(
+        "[Auth] Setting session cookie: samesite=%s secure=%s frontend_url=%s",
+        samesite, secure, frontend_url_clean,
+    )
+
     response.set_cookie(
         key=SESSION_COOKIE_NAME,
         value=token,
         max_age=SESSION_COOKIE_MAX_AGE,
         httponly=True,
-        secure=is_production,
-        samesite="lax",
+        secure=secure,
+        samesite=samesite,
         path="/",
     )
 
@@ -149,7 +161,9 @@ async def github_login(
     if installation_id is not None:
         metadata["pending_installation_id"] = installation_id
     state = _generate_state(metadata)
-    return RedirectResponse(url=_build_github_oauth_url(state))
+    redirect_url = _build_github_oauth_url(state)
+    logger.info("[Auth] /auth/github/login called — initiating OAuth redirect to GitHub")
+    return RedirectResponse(url=redirect_url)
 
 
 @router.get("/auth/github/callback")
@@ -170,6 +184,7 @@ async def github_callback(
       - Redirects to FRONTEND_URL/dashboard
     """
     _check_oauth_configured()
+    logger.info("[Auth] /auth/github/callback reached")
 
     # 1. Handle user denial
     if error:
@@ -179,6 +194,7 @@ async def github_callback(
     # 2. Verify and consume CSRF state
     state_data = _consume_state(state)
     if state_data is None:
+        logger.warning("[Auth] Callback state verification failed — state token invalid or expired")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid or expired OAuth state. Please start the login flow again.",
@@ -222,8 +238,8 @@ async def github_callback(
         email=email,
     )
     logger.info(
-        "[Auth] User logged in: %s (id=%s github_id=%s)",
-        user["github_username"], user["id"], user["github_user_id"],
+        "[Auth] User successfully authenticated: username=%s, github_id=%s, user_uuid=%s",
+        user["github_username"], user["github_user_id"], user["id"],
     )
 
     # 7. Handle pending installation from state
@@ -244,7 +260,9 @@ async def github_callback(
     )
 
     # 9. Set HttpOnly cookie + redirect to frontend dashboard
-    redirect = RedirectResponse(url=f"{FRONTEND_URL}/dashboard", status_code=302)
+    frontend_dest = f"{FRONTEND_URL.rstrip('/')}/dashboard"
+    logger.info("[Auth] Redirecting authenticated user to %s", frontend_dest)
+    redirect = RedirectResponse(url=frontend_dest, status_code=302)
     _set_session_cookie(redirect, session_token)
     return redirect
 
@@ -253,14 +271,21 @@ async def github_callback(
 async def logout(response: Response):
     """
     Logout endpoint — clears the session cookie.
-
-    The frontend should call this, then redirect to / or /login.
+    Must match samesite and secure attributes used when setting the cookie.
     """
+    frontend_url_clean = FRONTEND_URL.rstrip("/")
+    is_https = frontend_url_clean.startswith("https://")
+    samesite = "none" if is_https else "lax"
+    secure = True if is_https else False
+
     response.delete_cookie(
         key=SESSION_COOKIE_NAME,
         path="/",
         httponly=True,
+        secure=secure,
+        samesite=samesite,
     )
+    logger.info("[Auth] User logged out, session cookie deleted.")
     return {"status": "logged_out"}
 
 

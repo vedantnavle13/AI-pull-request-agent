@@ -40,7 +40,7 @@ GITHUB_APP_SLUG = os.getenv("GITHUB_APP_SLUG", "aipullrequestagent")
 APP_SECRET_KEY = os.getenv("APP_SECRET_KEY", "change-me-in-production-use-openssl-rand-hex-32")
 
 # Frontend origin used for OAuth redirect URLs.
-FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000").rstrip("/")
 
 # Name of the HttpOnly session cookie set after OAuth login.
 SESSION_COOKIE_NAME = "session"
