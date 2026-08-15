@@ -1622,6 +1622,64 @@ def upsert_github_installation(
         conn.close()
 
 
+def upsert_github_installation_orphan(
+    installation_id: int,
+    account_id: int,
+    account_login: str,
+    account_type: str,
+) -> dict:
+    """
+    Insert or update a GitHub App installation WITHOUT a user association (orphan).
+    
+    Used when a webhook arrives before the OAuth callback has associated the
+    installation with a user. The user_id is left NULL and will be filled in
+    later by _associate_installation when the user completes OAuth.
+    
+    installation_id has a UNIQUE constraint, so if it already exists we update
+    the account info but preserve the existing user_id (if any).
+    
+    Returns the full installation row as a dict.
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                INSERT INTO github_installations (
+                    user_id,
+                    installation_id,
+                    account_id,
+                    account_login,
+                    account_type
+                )
+                VALUES (NULL, %s, %s, %s, %s)
+                ON CONFLICT (installation_id)
+                DO UPDATE SET
+                    account_id    = EXCLUDED.account_id,
+                    account_login = EXCLUDED.account_login,
+                    account_type  = EXCLUDED.account_type,
+                    updated_at    = NOW()
+                RETURNING id, user_id, installation_id, account_id, account_login,
+                          account_type, created_at, updated_at
+                """,
+                (installation_id, account_id, account_login, account_type),
+            )
+            row = cur.fetchone()
+        conn.commit()
+        return {
+            "id":              str(row[0]),
+            "user_id":         str(row[1]) if row[1] else None,
+            "installation_id": row[2],
+            "account_id":      row[3],
+            "account_login":   row[4],
+            "account_type":    row[5],
+            "created_at":      row[6].isoformat() if row[6] else None,
+            "updated_at":      row[7].isoformat() if row[7] else None,
+        }
+    finally:
+        conn.close()
+
+
 def get_installation_by_installation_id(installation_id: int) -> dict | None:
     """
     Return the github_installations row for the given numeric installation_id.
@@ -1646,7 +1704,7 @@ def get_installation_by_installation_id(installation_id: int) -> dict | None:
             return None
         return {
             "id":              str(row[0]),
-            "user_id":         str(row[1]),
+            "user_id":         str(row[1]) if row[1] else None,
             "installation_id": row[2],
             "account_id":      row[3],
             "account_login":   row[4],

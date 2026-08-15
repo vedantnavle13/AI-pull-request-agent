@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import Layout from '../components/Layout';
 import { apiFetch } from '../api/client';
@@ -10,6 +10,8 @@ export default function Repositories() {
   const [repositories, setRepositories] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [syncing, setSyncing] = useState(false);
+  const syncIntervalRef = useRef(null);
 
   const fetchRepositories = async () => {
     setLoading(true);
@@ -25,9 +27,55 @@ export default function Repositories() {
     }
   };
 
+  const startSyncPolling = () => {
+    if (syncIntervalRef.current) return;
+    setSyncing(true);
+    syncIntervalRef.current = setInterval(async () => {
+      try {
+        const data = await apiFetch('/user/repositories');
+        const repos = data.repositories || [];
+        if (repos.length > 0) {
+          setRepositories(repos);
+          setSyncing(false);
+          if (syncIntervalRef.current) {
+            clearInterval(syncIntervalRef.current);
+            syncIntervalRef.current = null;
+          }
+        }
+      } catch (err) {
+        console.error('Sync polling failed:', err);
+      }
+    }, 3000); // Poll every 3 seconds
+  };
+
+  const stopSyncPolling = () => {
+    if (syncIntervalRef.current) {
+      clearInterval(syncIntervalRef.current);
+      syncIntervalRef.current = null;
+    }
+    setSyncing(false);
+  };
+
   useEffect(() => {
     fetchRepositories();
+    
+    // Cleanup on unmount
+    return () => {
+      stopSyncPolling();
+    };
   }, []);
+
+  // If we have no repos but just finished installation, start polling
+  useEffect(() => {
+    const urlParams = new URLSearchParams(window.location.search);
+    const justInstalled = urlParams.get('installation') === 'success';
+    
+    if (justInstalled && repositories.length === 0 && !loading) {
+      startSyncPolling();
+      // Clean up URL
+      window.history.replaceState({}, '', '/repositories');
+    }
+  }, [repositories.length, loading]);
 
   const installUrl = appInfo?.install_url || (appInfo?.slug ? `https://github.com/apps/${appInfo.slug}/installations/new` : 'https://github.com/apps/aipullrequestagent/installations/new');
 
@@ -60,6 +108,18 @@ export default function Repositories() {
           <button onClick={fetchRepositories} className="btn btn-secondary">
             Retry
           </button>
+        </div>
+      ) : syncing ? (
+        <div className="empty-state">
+          <div className="empty-state-icon">🔄</div>
+          <h3>Syncing Repositories...</h3>
+          <p>
+            We're fetching the repositories from your GitHub App installation. This usually takes a few seconds.
+          </p>
+          <div className="spinner-small" style={{ margin: '1rem auto' }} />
+          <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)' }}>
+            If this takes too long, <button onClick={() => { stopSyncPolling(); fetchRepositories(); }} style={{ background: 'none', border: 'none', color: 'var(--accent)', cursor: 'pointer', textDecoration: 'underline' }}>refresh manually</button>.
+          </p>
         </div>
       ) : repositories.length === 0 ? (
         <div className="empty-state">

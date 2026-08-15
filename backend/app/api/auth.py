@@ -58,6 +58,7 @@ from app.github.installation_sync import (
 from app.database.repository import (
     upsert_user,
     upsert_github_installation,
+    upsert_github_installation_orphan,
     get_installation_by_installation_id,
     get_installations_for_user,
     get_repositories_for_user,
@@ -416,6 +417,10 @@ async def github_installation_callback(
     GitHub redirects here after a user installs (or updates) the GitHub App.
     If 'code' is present, we log the user in immediately and associate the
     installation. Otherwise, we redirect through the login flow.
+    
+    IMPORTANT: We ALWAYS fetch installation info and sync repositories immediately,
+    even without an OAuth code. This creates an orphan installation record that
+    will be associated with the user when they complete OAuth.
     """
     _check_oauth_configured()
 
@@ -426,6 +431,39 @@ async def github_installation_callback(
 
     if setup_action == "delete":
         return JSONResponse({"status": "uninstalled", "installation_id": installation_id})
+
+    # ALWAYS fetch installation info and sync repositories first (creates orphan if needed)
+    try:
+        inst_info = _fetch_installation_info(installation_id)
+        account = inst_info.get("account", {})
+        
+        installation_record = upsert_github_installation_orphan(
+            installation_id=installation_id,
+            account_id=account.get("id", 0),
+            account_login=account.get("login", ""),
+            account_type=account.get("type", "User"),
+        )
+        installation_uuid = installation_record["id"]
+        
+        logger.info(
+            "[Installation] Created/updated orphan installation_id=%d (uuid=%s)",
+            installation_id, installation_uuid,
+        )
+        
+        synced = sync_installation_repositories(
+            installation_id=installation_id,
+            installation_uuid=installation_uuid,
+            upsert_repo_fn=upsert_repository,
+        )
+        logger.info(
+            "[Installation] Synced %d repos for installation_id=%d",
+            len(synced), installation_id,
+        )
+    except Exception as exc:
+        logger.error(
+            "[Installation] Failed to create orphan/sync for installation_id=%d: %s",
+            installation_id, exc,
+        )
 
     # If we have an OAuth code, log the user in immediately
     if code:
@@ -472,33 +510,57 @@ async def github_installation_callback(
         return redirect
 
     # No OAuth code — redirect through the login flow
+    # The installation is already synced; user will claim it on login
     state_token = _generate_state({"pending_installation_id": installation_id})
     return RedirectResponse(url=_build_github_oauth_url(state_token))
 
 
 async def _associate_installation(user_id: str, installation_id: int) -> None:
     """
-    Fetch installation metadata from GitHub, save it to the DB,
-    and sync repositories. Best-effort — errors are logged, not raised.
+    Associate a GitHub App installation with a user.
+    
+    Handles two cases:
+    1. Orphan installation (created by webhook before OAuth) — update user_id
+    2. New installation — create new record with user_id
+    
+    Then sync repositories.
     """
     try:
-        inst_info = _fetch_installation_info(installation_id)
-        account = inst_info.get("account", {})
-
-        installation_record = upsert_github_installation(
-            user_id=user_id,
-            installation_id=installation_id,
-            account_id=account.get("id", 0),
-            account_login=account.get("login", ""),
-            account_type=account.get("type", "User"),
-        )
-        installation_uuid = installation_record["id"]
-
+        # Check if installation already exists (orphan or associated)
+        existing = get_installation_by_installation_id(installation_id)
+        
+        if existing:
+            if existing.get("user_id"):
+                # Already associated with a user (could be same or different)
+                if existing["user_id"] != user_id:
+                    logger.warning(
+                        "[Installation] Installation %d already associated with user %s, "
+                        "attempting to associate with user %s",
+                        installation_id, existing["user_id"], user_id,
+                    )
+                installation_uuid = existing["id"]
+            else:
+                # Orphan installation — claim it for this user
+                installation_uuid = await _claim_orphan_installation(user_id, installation_id)
+        else:
+            # New installation — create with user_id
+            inst_info = _fetch_installation_info(installation_id)
+            account = inst_info.get("account", {})
+            
+            installation_record = upsert_github_installation(
+                user_id=user_id,
+                installation_id=installation_id,
+                account_id=account.get("id", 0),
+                account_login=account.get("login", ""),
+                account_type=account.get("type", "User"),
+            )
+            installation_uuid = installation_record["id"]
+        
         logger.info(
-            "[Installation] Saved installation_id=%d for user_id=%s",
-            installation_id, user_id,
+            "[Installation] Associated installation_id=%d with user_id=%s (uuid=%s)",
+            installation_id, user_id, installation_uuid,
         )
-
+        
         synced = sync_installation_repositories(
             installation_id=installation_id,
             installation_uuid=installation_uuid,
@@ -508,12 +570,51 @@ async def _associate_installation(user_id: str, installation_id: int) -> None:
             "[Installation] Synced %d repos for installation_id=%d",
             len(synced), installation_id,
         )
-
+        
     except Exception as exc:
         logger.error(
             "[Installation] Failed to associate installation_id=%d for user_id=%s: %s",
             installation_id, user_id, exc,
         )
+
+
+async def _claim_orphan_installation(user_id: str, installation_id: int) -> str:
+    """
+    Update an orphan installation (user_id=NULL) to associate it with a user.
+    Returns the installation UUID.
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE github_installations
+                SET user_id = %s, updated_at = NOW()
+                WHERE installation_id = %s AND user_id IS NULL
+                RETURNING id
+                """,
+                (user_id, installation_id),
+            )
+            row = cur.fetchone()
+        conn.commit()
+        
+        if row:
+            return str(row[0])
+        
+        # If no row updated, installation might have been claimed by another user
+        # or doesn't exist. Fall back to fetching info and upserting.
+        inst_info = _fetch_installation_info(installation_id)
+        account = inst_info.get("account", {})
+        installation_record = upsert_github_installation(
+            user_id=user_id,
+            installation_id=installation_id,
+            account_id=account.get("id", 0),
+            account_login=account.get("login", ""),
+            account_type=account.get("type", "User"),
+        )
+        return installation_record["id"]
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------

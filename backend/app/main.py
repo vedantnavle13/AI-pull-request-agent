@@ -12,11 +12,12 @@ from app.database.repository import (
     get_user_id_for_installation,
     get_installation_by_installation_id,
     upsert_repository,
+    upsert_github_installation_orphan,
 )
 from app.utils.logger import get_logger
 from app.api.metrics import router as metrics_router
 from app.api.auth import router as auth_router
-from app.github.installation_sync import sync_installation_repositories
+from app.github.installation_sync import sync_installation_repositories, _fetch_installation_info
 
 logger = get_logger(__name__)
 
@@ -162,9 +163,19 @@ async def webhook(request: Request):
             # Look up the installation_uuid in our database
             installation = get_installation_by_installation_id(installation_id)
             if not installation:
-                # This is expected if the OAuth callback hasn't completed yet
-                return {"status": "ignored", "reason": "installation not found in database"}
-                
+                # Race condition: webhook arrived before OAuth callback.
+                # Fetch installation info from GitHub and create orphan record.
+                logger.info("[Webhook] Installation %s not in DB — fetching from GitHub and creating orphan record", installation_id)
+                inst_info = _fetch_installation_info(installation_id)
+                account = inst_info.get("account", {})
+                installation = upsert_github_installation_orphan(
+                    installation_id=installation_id,
+                    account_id=account.get("id", 0),
+                    account_login=account.get("login", ""),
+                    account_type=account.get("type", "User"),
+                )
+                logger.info("[Webhook] Created orphan installation record: uuid=%s", installation["id"])
+            
             installation_uuid = installation["id"]
             synced = sync_installation_repositories(
                 installation_id=installation_id,

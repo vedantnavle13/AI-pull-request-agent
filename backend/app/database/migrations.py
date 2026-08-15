@@ -502,7 +502,7 @@ def ensure_schema() -> None:
                 """
                 CREATE TABLE IF NOT EXISTS github_installations (
                     id              UUID        PRIMARY KEY DEFAULT gen_random_uuid(),
-                    user_id         UUID        NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                    user_id         UUID        REFERENCES users(id) ON DELETE SET NULL,
                     installation_id BIGINT      NOT NULL UNIQUE,
                     account_id      BIGINT      NOT NULL,
                     account_login   TEXT        NOT NULL,
@@ -510,6 +510,18 @@ def ensure_schema() -> None:
                     created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
                     updated_at      TIMESTAMPTZ NOT NULL DEFAULT NOW()
                 );
+                """
+            )
+
+            # Ensure user_id is nullable for orphan installations (race condition fix)
+            cursor.execute(
+                """
+                DO $$
+                BEGIN
+                    ALTER TABLE github_installations ALTER COLUMN user_id DROP NOT NULL;
+                EXCEPTION WHEN others THEN NULL;
+                END
+                $$;
                 """
             )
 
