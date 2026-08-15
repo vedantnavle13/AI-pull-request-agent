@@ -1,0 +1,18 @@
+/*
+  X-Frame-Options: SAMEORIGIN
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+
+# index.html must NEVER be cached — stale index.html loads old JS bundles.
+# This is why login works in Incognito (no disk cache) but not normal Chrome.
+/
+  Cache-Control: no-store, no-cache, must-revalidate
+  Pragma: no-cache
+
+/index.html
+  Cache-Control: no-store, no-cache, must-revalidate
+  Pragma: no-cache
+
+# Hashed JS/CSS assets are content-addressed — safe to cache forever.
+/assets/*
+  Cache-Control: public, max-age=31536000, immutable

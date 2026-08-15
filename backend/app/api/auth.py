@@ -28,6 +28,11 @@ Installation flow:
 """
 
 import secrets
+import hmac
+import hashlib
+import json
+import base64
+import time
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import RedirectResponse, JSONResponse
@@ -39,6 +44,7 @@ from app.config import (
     GITHUB_APP_SLUG,
     SESSION_COOKIE_NAME,
     SESSION_COOKIE_MAX_AGE,
+    APP_SECRET_KEY,
 )
 from app.github.oauth import (
     exchange_code_for_token,
@@ -67,23 +73,68 @@ logger = get_logger(__name__)
 router = APIRouter(tags=["auth"])
 
 # ---------------------------------------------------------------------------
-# OAuth state store (in-memory; replace with Redis for production scale)
+# OAuth state — HMAC-signed stateless tokens (no server-side storage needed)
+#
+# The old in-memory _STATE_STORE was wiped on every Render backend
+# spindown/restart, causing "Invalid or expired OAuth state" errors on
+# callback. Signed tokens survive any number of restarts.
 # ---------------------------------------------------------------------------
-_STATE_STORE: dict[str, dict] = {}
-_MAX_STATES = 500
+_STATE_EXPIRY_SECONDS = 600  # 10 minutes
 
 
 def _generate_state(metadata: dict | None = None) -> str:
-    state = secrets.token_urlsafe(32)
-    if len(_STATE_STORE) >= _MAX_STATES:
-        oldest = next(iter(_STATE_STORE))
-        del _STATE_STORE[oldest]
-    _STATE_STORE[state] = metadata or {}
-    return state
+    """
+    Create a CSRF state token that encodes its own validity.
+    Format: base64(payload).hmac_signature
+    No server-side storage required.
+    """
+    payload = {
+        "t": int(time.time()),            # issued-at timestamp
+        "n": secrets.token_urlsafe(16),   # nonce for uniqueness
+        "m": metadata or {},              # caller metadata
+    }
+    payload_json = json.dumps(payload, separators=(',', ':'), sort_keys=True)
+    payload_b64 = base64.urlsafe_b64encode(payload_json.encode()).decode().rstrip('=')
+    sig = hmac.new(
+        APP_SECRET_KEY.encode(), payload_b64.encode(), hashlib.sha256
+    ).hexdigest()[:24]
+    return f"{payload_b64}.{sig}"
 
 
 def _consume_state(state: str) -> dict | None:
-    return _STATE_STORE.pop(state, None)
+    """
+    Validate and parse a state token. Returns the embedded metadata dict
+    on success, or None if the token is invalid, tampered, or expired.
+    """
+    try:
+        payload_b64, sig = state.rsplit('.', 1)
+    except ValueError:
+        return None
+
+    try:
+        expected_sig = hmac.new(
+            APP_SECRET_KEY.encode(), payload_b64.encode(), hashlib.sha256
+        ).hexdigest()[:24]
+    except Exception:
+        return None
+
+    if not hmac.compare_digest(sig, expected_sig):
+        logger.warning("[Auth] OAuth state HMAC mismatch — possible CSRF attempt")
+        return None
+
+    try:
+        padding = '=' * (4 - len(payload_b64) % 4)
+        payload_json = base64.urlsafe_b64decode(payload_b64 + padding).decode()
+        payload = json.loads(payload_json)
+    except Exception:
+        return None
+
+    age = time.time() - payload.get("t", 0)
+    if age > _STATE_EXPIRY_SECONDS:
+        logger.warning("[Auth] OAuth state expired (age=%.0fs)", age)
+        return None
+
+    return payload.get("m", {})
 
 
 # ---------------------------------------------------------------------------
