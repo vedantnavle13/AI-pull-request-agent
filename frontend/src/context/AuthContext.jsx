@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
-import { apiFetch, API_URL } from '../api/client';
+import { apiFetch, API_URL, BACKEND_URL } from '../api/client';
 
 const AuthContext = createContext(null);
 
@@ -42,11 +42,13 @@ export function AuthProvider({ children }) {
   }, []);
 
   const login = () => {
-    const oauthUrl = `${API_URL}/auth/github/login`;
-    console.log('[Login] GitHub login clicked');
-    console.log('[Login] API URL:', import.meta.env.VITE_API_URL);
-    console.log('[Login] Resolved API URL:', API_URL);
-    console.log('[Login] OAuth URL:', oauthUrl);
+    // Navigate DIRECTLY to the backend for OAuth — bypasses Render CDN proxy.
+    // Render's Cloudflare CDN caches 302 redirects, causing blank pages on
+    // subsequent login clicks. Going to the backend directly avoids this.
+    // The OAuth callback is set to the frontend domain so Set-Cookie lands
+    // on the correct host for same-origin cookie access.
+    const oauthUrl = `${BACKEND_URL}/auth/github/login`;
+    console.log('[Login] Navigating directly to backend OAuth:', oauthUrl);
     window.location.assign(oauthUrl);
   };
 

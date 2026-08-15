@@ -1,5 +1,19 @@
 const rawApiUrl = import.meta.env.VITE_API_URL;
+
+// All authenticated API fetch calls go through /api (Render rewrite → backend).
+// This ensures cookies are same-origin and never hit CDN caching issues.
 export const API_URL = '/api';
+
+// Direct backend URL used ONLY for the OAuth login redirect.
+// Must bypass Render's CDN proxy because Cloudflare caches 302 redirects,
+// turning subsequent login clicks into a blank 304 Not Modified page.
+const rawBackendUrl = import.meta.env.VITE_BACKEND_URL;
+export const BACKEND_URL = (rawBackendUrl && rawBackendUrl !== 'undefined' && rawBackendUrl.trim() !== '')
+  ? rawBackendUrl.replace(/\/+$/, '')
+  : (typeof window !== 'undefined' && window.location.hostname.includes('onrender.com')
+      ? 'https://ai-pull-request-agent-api.onrender.com'
+      : 'http://localhost:8000');
+
 
 export async function apiFetch(endpoint, options = {}) {
   const url = endpoint.startsWith('http') ? endpoint : `${API_URL}${endpoint}`;
