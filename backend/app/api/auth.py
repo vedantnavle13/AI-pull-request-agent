@@ -188,6 +188,7 @@ async def github_login(
     """
     Initiate GitHub OAuth login.
     Redirects the user's browser to GitHub's authorization page.
+    Cache-Control: no-store prevents Cloudflare from caching this redirect.
     """
     _check_oauth_configured()
     metadata: dict = {}
@@ -196,7 +197,9 @@ async def github_login(
     state = _generate_state(metadata)
     redirect_url = _build_github_oauth_url(state)
     logger.info("[Auth] /auth/github/login called — initiating OAuth redirect to GitHub")
-    return RedirectResponse(url=redirect_url)
+    response = RedirectResponse(url=redirect_url)
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private"
+    return response
 
 
 @router.get("/auth/github/callback")
@@ -296,6 +299,7 @@ async def github_callback(
     frontend_dest = f"{FRONTEND_URL.rstrip('/')}/dashboard"
     logger.info("[Auth] Redirecting authenticated user to %s", frontend_dest)
     redirect = RedirectResponse(url=frontend_dest, status_code=302)
+    redirect.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private"
     _set_session_cookie(redirect, session_token)
     return redirect
 
