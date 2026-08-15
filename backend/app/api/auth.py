@@ -251,7 +251,9 @@ async def github_login(
 @router.get("/auth/github/callback")
 async def github_callback(
     code: str = Query(..., description="OAuth authorization code from GitHub"),
-    state: str = Query(..., description="CSRF state token"),
+    state: str | None = Query(None, description="CSRF state token (missing during direct installation)"),
+    installation_id: int | None = Query(None, description="GitHub App installation ID (present during installation)"),
+    setup_action: str | None = Query(None, description="Setup action (e.g. 'install')"),
     error: str | None = Query(None),
     error_description: str | None = Query(None),
 ):
@@ -274,13 +276,16 @@ async def github_callback(
         return RedirectResponse(url=f"{FRONTEND_URL}/auth/error?reason={error}")
 
     # 2. Verify and consume CSRF state
-    state_data = _consume_state(state)
-    if state_data is None:
-        logger.warning("[Auth] Callback state verification failed — state token invalid or expired")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid or expired OAuth state. Please start the login flow again.",
-        )
+    state_data = {}
+    if state:
+        state_data_result = _consume_state(state)
+        if state_data_result is None:
+            logger.warning("[Auth] Callback state verification failed — state token invalid or expired")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid or expired OAuth state. Please start the login flow again.",
+            )
+        state_data = state_data_result
 
     # 3. Exchange code → GitHub access token
     try:
@@ -324,8 +329,8 @@ async def github_callback(
         user["github_username"], user["github_user_id"], user["id"],
     )
 
-    # 7. Handle pending installation from state
-    pending_installation_id = state_data.get("pending_installation_id")
+    # 7. Handle pending installation from state or query params
+    pending_installation_id = state_data.get("pending_installation_id") or installation_id
     if pending_installation_id:
         await _associate_installation(
             user_id=user["id"],
@@ -346,7 +351,10 @@ async def github_callback(
     #    store it in localStorage, and navigate to /dashboard.
     #    This completely bypasses all cookie/CDN/SameSite/Partitioned issues.
     from urllib.parse import urlencode
-    frontend_dest = f"{FRONTEND_URL.rstrip('/')}/auth/callback?{urlencode({'token': session_token})}"
+    query_params = {'token': session_token}
+    if pending_installation_id:
+        query_params['installation'] = 'success'
+    frontend_dest = f"{FRONTEND_URL.rstrip('/')}/auth/callback?{urlencode(query_params)}"
     logger.info("[Auth] Redirecting authenticated user to frontend callback")
     redirect = RedirectResponse(url=frontend_dest, status_code=302)
     redirect.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private"
