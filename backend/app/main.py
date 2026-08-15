@@ -14,6 +14,7 @@ from app.database.repository import (
 from app.utils.logger import get_logger
 from app.api.metrics import router as metrics_router
 from app.api.auth import router as auth_router
+from app.github.installation_sync import sync_installation_repositories
 
 logger = get_logger(__name__)
 
@@ -148,21 +149,39 @@ async def webhook(request: Request):
             "reason": "duplicate delivery",
         }
 
-    # 6. Only process pull_request
+    # 6. Process installation and repository sync events
+    if event_type in ("installation", "installation_repositories"):
+        installation_id = payload.get("installation", {}).get("id")
+        if not installation_id:
+            return {"status": "ignored", "reason": "missing installation id"}
+            
+        logger.info("[Webhook] Received %s for installation_id=%s. Syncing repositories...", event_type, installation_id)
+        try:
+            # We pass installation_uuid=None so it looks up the UUID from the DB
+            # If the installation doesn't exist yet, this will raise an exception,
+            # which is fine (it means the OAuth callback hasn't completed yet).
+            synced = sync_installation_repositories(installation_id=installation_id)
+            logger.info("[Webhook] Synced %d repositories for installation_id=%s", len(synced), installation_id)
+            return {"status": "synced", "repositories_count": len(synced)}
+        except Exception as e:
+            logger.error("[Webhook] Failed to sync repositories for installation_id=%s: %s", installation_id, e)
+            return {"status": "error", "reason": str(e)}
+
+    # 7. Only process pull_request beyond this point
     if event_type != "pull_request":
         return {
             "status": "ignored",
             "reason": f"event={event_type}",
         }
 
-    # 7. Only process relevant actions
+    # 8. Only process relevant PR actions
     if action not in {"opened", "synchronize", "reopened"}:
         return {
             "status": "ignored",
             "reason": f"action={action}",
         }
 
-    # 8. Extract PR information
+    # 9. Extract PR information
     pull_request = payload["pull_request"]
     repository = payload["repository"]
     installation = payload["installation"]
