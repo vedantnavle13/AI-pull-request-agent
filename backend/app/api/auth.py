@@ -164,26 +164,20 @@ def _build_github_oauth_url(state: str, scope: str = "read:user,user:email") -> 
 
 def _set_session_cookie(response: Response, token: str) -> None:
     """
-    Set the HttpOnly session cookie.
+    Set the HttpOnly session cookie (backward-compatibility / defense-in-depth).
 
-    ARCHITECTURE:
-    The GitHub OAuth callback URL is registered as:
-      https://ai-pull-request-agent.onrender.com/api/auth/github/callback
-    Render rewrites this to the backend, which processes the callback and
-    returns Set-Cookie. The browser attributes the cookie to the frontend
-    host: ai-pull-request-agent.onrender.com.
+    PRIMARY AUTH: The frontend now uses Authorization: Bearer tokens stored
+    in localStorage. The backend callback redirects to
+    /auth/callback?token=<JWT>, and the frontend stores it.
 
-    Therefore all /api/* fetch calls from React are same-origin to
-    ai-pull-request-agent.onrender.com, the browser sends the cookie, and
-    the Render rewrite proxies the request (with the Cookie header) to the
-    backend.
+    SECONDARY AUTH: This cookie is set as a fallback. The backend's
+    get_current_user dependency checks Bearer header first, then falls
+    back to Cookie.
 
     Cookie attributes:
-    - SameSite=Lax : safe for same-origin architecture; no cross-site needed.
-    - Secure=True  : always True in production (HTTPS).
-    - HttpOnly     : always True to prevent XSS access.
-    - Path=/       : applies to all routes.
-    - NO Partitioned/CHIPS attribute.
+    - SameSite=None + Secure : required for cross-origin cookie (backend ≠ frontend host)
+    - HttpOnly               : prevents XSS access
+    - Path=/                 : applies to all routes
     """
     import os
     frontend_url_clean = FRONTEND_URL.rstrip("/")
@@ -194,13 +188,14 @@ def _set_session_cookie(response: Response, token: str) -> None:
         or os.getenv("ENVIRONMENT") == "production"
     )
 
-    samesite = "lax"
+    # Cross-origin (backend ≠ frontend host) requires samesite=none + secure.
+    # Local dev (same host, HTTP) uses samesite=lax.
+    samesite = "none" if is_https else "lax"
     secure = is_https
 
     logger.info(
-        "[Auth Cookie] Setting session cookie — samesite=%s secure=%s httponly=True path=/ "
-        "is_https=%s is_render=%s frontend_url=%s",
-        samesite, secure, is_https, is_render, frontend_url_clean,
+        "[Auth Cookie] Setting session cookie — samesite=%s secure=%s httponly=True path=/",
+        samesite, secure,
     )
 
     response.set_cookie(
@@ -346,11 +341,16 @@ async def github_callback(
         },
     )
 
-    # 9. Set HttpOnly cookie + redirect to frontend dashboard
-    frontend_dest = f"{FRONTEND_URL.rstrip('/')}/dashboard"
-    logger.info("[Auth] Redirecting authenticated user to %s", frontend_dest)
+    # 9. Redirect to frontend with token in URL query parameter.
+    #    The frontend AuthCallback page will read the token from the URL,
+    #    store it in localStorage, and navigate to /dashboard.
+    #    This completely bypasses all cookie/CDN/SameSite/Partitioned issues.
+    from urllib.parse import urlencode
+    frontend_dest = f"{FRONTEND_URL.rstrip('/')}/auth/callback?{urlencode({'token': session_token})}"
+    logger.info("[Auth] Redirecting authenticated user to frontend callback")
     redirect = RedirectResponse(url=frontend_dest, status_code=302)
     redirect.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private"
+    # Also set cookie for backward compatibility (won't break anything)
     _set_session_cookie(redirect, session_token)
     return redirect
 
@@ -359,11 +359,7 @@ async def github_callback(
 async def logout(response: Response):
     """
     Logout endpoint — clears the session cookie.
-    Attributes MUST exactly match those used by _set_session_cookie:
-    - samesite=lax
-    - httponly=True
-    - secure=True (production) / False (local http)
-    - path=/
+    Attributes MUST exactly match those used by _set_session_cookie.
     """
     import os
     frontend_url_clean = FRONTEND_URL.rstrip("/")
@@ -379,7 +375,7 @@ async def logout(response: Response):
         path="/",
         httponly=True,
         secure=is_https,
-        samesite="lax",
+        samesite="none" if is_https else "lax",
     )
     response.headers["Cache-Control"] = "no-store"
     logger.info("[Auth] User logged out, session cookie deleted.")
@@ -458,7 +454,12 @@ async def github_installation_callback(
             },
         )
 
-        redirect = RedirectResponse(url=f"{FRONTEND_URL}/dashboard?installation=success", status_code=302)
+        from urllib.parse import urlencode
+        redirect = RedirectResponse(
+            url=f"{FRONTEND_URL.rstrip('/')}/auth/callback?{urlencode({'token': session_token, 'installation': 'success'})}",
+            status_code=302,
+        )
+        redirect.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private"
         _set_session_cookie(redirect, session_token)
         return redirect
 

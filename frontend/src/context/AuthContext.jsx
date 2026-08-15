@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
-import { apiFetch, API_URL, BACKEND_URL } from '../api/client';
+import { apiFetch, BACKEND_URL, getToken, clearToken } from '../api/client';
 
 const AuthContext = createContext(null);
 
@@ -11,16 +11,16 @@ export function AuthProvider({ children }) {
   const refreshUser = async () => {
     try {
       setLoading(true);
-      console.log('[AuthContext] Checking /user/me');
+      // Only attempt if we have a stored token — avoids unnecessary 401s
+      if (!getToken()) {
+        setUser(null);
+        return;
+      }
       const data = await apiFetch('/user/me');
-      console.log('[AuthContext] /user/me status: 200 OK — authenticated as @', data?.github_username);
+      console.log('[Auth] Authenticated as @', data?.github_username);
       setUser(data);
     } catch (err) {
-      const status = err.status || (err.message && err.message.includes('401') ? 401 : 'unknown');
-      console.log('[AuthContext] /user/me status:', status);
-      if (status === 401) {
-        console.log('[AuthContext] /user/me 401 — session cookie not accepted or user unauthenticated');
-      }
+      console.log('[Auth] /user/me failed:', err.status || err.message);
       setUser(null);
     } finally {
       setLoading(false);
@@ -32,7 +32,7 @@ export function AuthProvider({ children }) {
       const data = await apiFetch('/auth/github/app-info');
       setAppInfo(data);
     } catch (err) {
-      console.warn('Could not fetch GitHub app info:', err);
+      console.warn('[Auth] Could not fetch app info:', err);
     }
   };
 
@@ -42,22 +42,19 @@ export function AuthProvider({ children }) {
   }, []);
 
   const login = () => {
-    // Navigate DIRECTLY to the backend for OAuth — bypasses Render CDN proxy.
-    // Render's Cloudflare CDN caches 302 redirects, causing blank pages on
-    // subsequent login clicks. Going to the backend directly avoids this.
-    // The OAuth callback is set to the frontend domain so Set-Cookie lands
-    // on the correct host for same-origin cookie access.
+    // Navigate directly to backend — bypasses Render CDN completely.
+    // The CDN (Cloudflare) was caching OAuth redirects and returning
+    // 304 Not Modified, causing blank pages. Direct backend call is immune.
     const oauthUrl = `${BACKEND_URL}/auth/github/login`;
-    console.log('[Login] Navigating directly to backend OAuth:', oauthUrl);
+    console.log('[Auth] Navigating to backend OAuth:', oauthUrl);
     window.location.assign(oauthUrl);
   };
 
   const logout = async () => {
     try {
-      await apiFetch('/auth/logout', { method: 'POST' });
-    } catch (err) {
-      console.error('Logout error:', err);
+      await apiFetch('/auth/logout', { method: 'POST' }).catch(() => {});
     } finally {
+      clearToken();          // Remove JWT from localStorage
       setUser(null);
       window.location.href = '/';
     }

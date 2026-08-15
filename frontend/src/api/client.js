@@ -1,12 +1,5 @@
-const rawApiUrl = import.meta.env.VITE_API_URL;
-
-// All authenticated API fetch calls go through /api (Render rewrite → backend).
-// This ensures cookies are same-origin and never hit CDN caching issues.
-export const API_URL = '/api';
-
-// Direct backend URL used ONLY for the OAuth login redirect.
-// Must bypass Render's CDN proxy because Cloudflare caches 302 redirects,
-// turning subsequent login clicks into a blank 304 Not Modified page.
+// Direct backend URL — used for OAuth login redirect (bypasses Render CDN proxy).
+// GitHub OAuth callback is also on the backend directly (not the Render proxy).
 const rawBackendUrl = import.meta.env.VITE_BACKEND_URL;
 export const BACKEND_URL = (rawBackendUrl && rawBackendUrl !== 'undefined' && rawBackendUrl.trim() !== '')
   ? rawBackendUrl.replace(/\/+$/, '')
@@ -14,16 +7,40 @@ export const BACKEND_URL = (rawBackendUrl && rawBackendUrl !== 'undefined' && ra
       ? 'https://ai-pull-request-agent-api.onrender.com'
       : 'http://localhost:8000');
 
+// All non-OAuth API calls go through the same BACKEND_URL.
+// We use Authorization: Bearer header — no cross-origin cookies needed.
+export const API_URL = BACKEND_URL;
 
+// ---------------------------------------------------------------------------
+// Token storage (localStorage) — survives page refresh, works cross-tab
+// ---------------------------------------------------------------------------
+const TOKEN_KEY = 'ai_pr_agent_token';
+
+export function getToken() {
+  try { return localStorage.getItem(TOKEN_KEY); } catch { return null; }
+}
+
+export function setToken(token) {
+  try { localStorage.setItem(TOKEN_KEY, token); } catch {}
+}
+
+export function clearToken() {
+  try { localStorage.removeItem(TOKEN_KEY); } catch {}
+}
+
+// ---------------------------------------------------------------------------
+// API fetch — sends Authorization: Bearer token on every authenticated request
+// ---------------------------------------------------------------------------
 export async function apiFetch(endpoint, options = {}) {
   const url = endpoint.startsWith('http') ? endpoint : `${API_URL}${endpoint}`;
-  
+
+  const token = getToken();
   const headers = {
     'Accept': 'application/json',
+    ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
     ...options.headers,
   };
 
-  // If payload is object and not FormData, stringify
   let body = options.body;
   if (body && typeof body === 'object' && !(body instanceof FormData)) {
     headers['Content-Type'] = 'application/json';
@@ -34,14 +51,16 @@ export async function apiFetch(endpoint, options = {}) {
     ...options,
     headers,
     body,
-    credentials: 'include', // Ensures HttpOnly cookies are sent cross-origin
+    // Keep credentials:include so existing HttpOnly cookies still work
+    // for any session that was set before this migration.
+    credentials: 'include',
   };
 
   try {
     const response = await fetch(url, config);
 
-    // Handle 401 Unauthorized globally if needed or pass back to caller
     if (response.status === 401) {
+      clearToken(); // Token invalid — clear stored token
       const data = await response.json().catch(() => ({}));
       const error = new Error(data.detail || 'Unauthorized');
       error.status = 401;
