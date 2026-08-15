@@ -113,14 +113,26 @@ def _build_github_oauth_url(state: str, scope: str = "read:user,user:email") -> 
 
 def _set_session_cookie(response: Response, token: str) -> None:
     """
-    Set the HttpOnly session cookie on any response object.
+    Set the HttpOnly session cookie.
 
-    For cross-site production HTTPS (frontend on ai-pull-request-agent.onrender.com
-    and backend on ai-pull-request-agent-api.onrender.com), SameSite MUST be 'none'
-    and Secure MUST be True.
+    ARCHITECTURE:
+    The GitHub OAuth callback URL is registered as:
+      https://ai-pull-request-agent.onrender.com/api/auth/github/callback
+    Render rewrites this to the backend, which processes the callback and
+    returns Set-Cookie. The browser attributes the cookie to the frontend
+    host: ai-pull-request-agent.onrender.com.
 
-    For local HTTP development (http://localhost:3000), SameSite='lax' and Secure=False
-    is used because browsers reject SameSite=None without Secure over plain HTTP.
+    Therefore all /api/* fetch calls from React are same-origin to
+    ai-pull-request-agent.onrender.com, the browser sends the cookie, and
+    the Render rewrite proxies the request (with the Cookie header) to the
+    backend.
+
+    Cookie attributes:
+    - SameSite=Lax : safe for same-origin architecture; no cross-site needed.
+    - Secure=True  : always True in production (HTTPS).
+    - HttpOnly     : always True to prevent XSS access.
+    - Path=/       : applies to all routes.
+    - NO Partitioned/CHIPS attribute.
     """
     import os
     frontend_url_clean = FRONTEND_URL.rstrip("/")
@@ -131,13 +143,12 @@ def _set_session_cookie(response: Response, token: str) -> None:
         or os.getenv("ENVIRONMENT") == "production"
     )
 
-    # With the same-origin proxy architecture, the API runs on the same domain as the frontend.
-    # We use SameSite='lax' for both local dev and production for optimal security.
     samesite = "lax"
-    secure = True if is_https else False
+    secure = is_https
 
     logger.info(
-        "[Auth Cookie Diagnostic] Emitting session cookie: samesite=%s secure=%s httponly=True path=/ is_https=%s is_render=%s frontend_url=%s",
+        "[Auth Cookie] Setting session cookie — samesite=%s secure=%s httponly=True path=/ "
+        "is_https=%s is_render=%s frontend_url=%s",
         samesite, secure, is_https, is_render, frontend_url_clean,
     )
 
@@ -293,28 +304,29 @@ async def github_callback(
 async def logout(response: Response):
     """
     Logout endpoint — clears the session cookie.
-    Must match samesite and secure attributes used when setting the cookie.
+    Attributes MUST exactly match those used by _set_session_cookie:
+    - samesite=lax
+    - httponly=True
+    - secure=True (production) / False (local http)
+    - path=/
     """
     import os
     frontend_url_clean = FRONTEND_URL.rstrip("/")
+    is_render = os.getenv("RENDER") is not None
     is_https = (
         frontend_url_clean.startswith("https://")
-        or os.getenv("RENDER") is not None
+        or is_render
         or os.getenv("ENVIRONMENT") == "production"
     )
-    
-    # Must perfectly match the attributes used when setting the cookie
-    samesite = "lax"
-    secure = True if is_https else False
 
     response.delete_cookie(
         key=SESSION_COOKIE_NAME,
         path="/",
         httponly=True,
-        secure=secure,
-        samesite=samesite,
+        secure=is_https,
+        samesite="lax",
     )
-
+    response.headers["Cache-Control"] = "no-store"
     logger.info("[Auth] User logged out, session cookie deleted.")
     return {"status": "logged_out"}
 
@@ -445,8 +457,14 @@ async def _associate_installation(user_id: str, installation_id: int) -> None:
 # ---------------------------------------------------------------------------
 
 @router.get("/user/me")
-async def get_me(current_user: dict = Depends(get_current_user)):
-    """Return the current user's profile."""
+async def get_me(
+    request: Request,
+    response: Response,
+    current_user: dict = Depends(get_current_user),
+):
+    """Return the current user's profile. No-store prevents CDN caching of user-specific data."""
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, private"
+    response.headers["Pragma"] = "no-cache"
     return {
         "id":                current_user["id"],
         "github_username":   current_user["github_username"],
