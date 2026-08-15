@@ -10,6 +10,8 @@ from app.database.repository import (
     claim_review_run,
     get_review,
     get_user_id_for_installation,
+    get_installation_by_installation_id,
+    upsert_repository,
 )
 from app.utils.logger import get_logger
 from app.api.metrics import router as metrics_router
@@ -157,10 +159,18 @@ async def webhook(request: Request):
             
         logger.info("[Webhook] Received %s for installation_id=%s. Syncing repositories...", event_type, installation_id)
         try:
-            # We pass installation_uuid=None so it looks up the UUID from the DB
-            # If the installation doesn't exist yet, this will raise an exception,
-            # which is fine (it means the OAuth callback hasn't completed yet).
-            synced = sync_installation_repositories(installation_id=installation_id)
+            # Look up the installation_uuid in our database
+            installation = get_installation_by_installation_id(installation_id)
+            if not installation:
+                # This is expected if the OAuth callback hasn't completed yet
+                return {"status": "ignored", "reason": "installation not found in database"}
+                
+            installation_uuid = installation["id"]
+            synced = sync_installation_repositories(
+                installation_id=installation_id,
+                installation_uuid=installation_uuid,
+                upsert_repo_fn=upsert_repository,
+            )
             logger.info("[Webhook] Synced %d repositories for installation_id=%s", len(synced), installation_id)
             return {"status": "synced", "repositories_count": len(synced)}
         except Exception as e:
