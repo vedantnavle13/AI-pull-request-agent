@@ -1,4 +1,4 @@
-# 🤖 AI Pull Request Agent
+#  AI Pull Request Agent
 
 An automated, multi-agent AI system that reviews GitHub Pull Requests using Google's Gemini API and LangGraph. Built as a multi-user SaaS GitHub App, it provides instant, high-quality code reviews directly as PR comments.
 
