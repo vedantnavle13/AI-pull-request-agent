@@ -112,12 +112,18 @@ def sync_installation_repositories(
                            module testable without a live database connection.
 
     Returns:
-        List of upserted repository dicts from the database.
+        List of upserted (active) repository dicts from the database.
 
     This function is idempotent — calling it multiple times with the same
     installation_id produces the same database state (ON CONFLICT DO UPDATE).
+
+    Repos that are no longer accessible to the installation (removed by user
+    in GitHub settings) are automatically deactivated in the database.
     """
+    from app.database.postgres import get_connection
+
     raw_repos = _fetch_installation_repos(installation_id)
+    active_full_names = {repo["full_name"] for repo in raw_repos}
 
     synced = []
     for repo in raw_repos:
@@ -137,6 +143,32 @@ def sync_installation_repositories(
                 "[InstallationSync] Failed to upsert repo %s: %s",
                 repo.get("full_name"), exc,
             )
+
+    # Deactivate any repos that are no longer in this installation's access list
+    try:
+        conn = get_connection()
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE repositories
+                SET    active     = FALSE,
+                       updated_at = NOW()
+                WHERE  installation_id = %s
+                  AND  active = TRUE
+                  AND  full_name != ALL(%s)
+                """,
+                (installation_uuid, list(active_full_names) if active_full_names else [""]),
+            )
+            deactivated = cur.rowcount
+        conn.commit()
+        conn.close()
+        if deactivated:
+            logger.info(
+                "[InstallationSync] Deactivated %d repo(s) no longer in installation_id=%d",
+                deactivated, installation_id,
+            )
+    except Exception as exc:
+        logger.error("[InstallationSync] Failed to deactivate stale repos: %s", exc)
 
     logger.info(
         "[InstallationSync] Synced %d/%d repositories for installation_id=%d",
