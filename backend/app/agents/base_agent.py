@@ -33,7 +33,7 @@ class BaseAgent:
 
         self.client = genai.Client(api_key=api_key)
 
-        self.model = os.getenv("GEMINI_MODEL", "gemini-3.7-flash")
+        self.model = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
         self.last_usage: dict = {}
 
     def review(

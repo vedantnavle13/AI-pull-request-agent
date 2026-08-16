@@ -277,7 +277,7 @@ async def _review_pr_impl(
             )
 
         # --- Real LLM token usage per-agent ---
-        model_name = os.getenv("GEMINI_MODEL", "gemini-3.7-flash")
+        model_name = os.getenv("GEMINI_MODEL", "gemini-3.6-flash")
         for ag_name, ag_prefix in [
             ("security", "security"),
             ("quality",  "quality"),
