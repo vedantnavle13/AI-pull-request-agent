@@ -32,7 +32,7 @@ class BaseAgent:
 
         self.client = genai.Client(api_key=api_key)
 
-        self.model = os.getenv("GEMINI_MODEL", "gemini-flash-latest")
+        self.model = os.getenv("GEMINI_MODEL", "gemini-2.0-flash")
         self.last_usage: dict = {}
 
     def review(
@@ -68,8 +68,7 @@ class BaseAgent:
 
         logger.debug("[%s] Calling Gemini model=%s", self.name, self.model)
 
-        max_retries = int(os.getenv("GEMINI_MAX_RETRIES", "3"))
-        backoff_seconds = 2.0
+        max_retries = int(os.getenv("GEMINI_MAX_RETRIES", "5"))
 
         response = None
         for attempt in range(1, max_retries + 1):
@@ -86,30 +85,34 @@ class BaseAgent:
                 break
             except APIError as e:
                 err_str = str(e)
-                is_rate_limit = "429" in err_str or "RESOURCE_EXHAUSTED" in err_str
-                if is_rate_limit and attempt < max_retries:
-                    wait_time = backoff_seconds * (2 ** (attempt - 1))
+                is_rate_limit   = "429" in err_str or "RESOURCE_EXHAUSTED" in err_str
+                is_server_error = "503" in err_str or "UNAVAILABLE" in err_str or "500" in err_str
+
+                if (is_rate_limit or is_server_error) and attempt < max_retries:
+                    # 503 = server overload → wait longer; 429 = rate limit → shorter wait
+                    base = 10.0 if is_server_error else 2.0
+                    wait_time = base * (2 ** (attempt - 1))  # exponential backoff
+                    wait_time = min(wait_time, 60.0)         # cap at 60 s
+                    reason = "503 Unavailable (high demand)" if is_server_error else "429 Rate Limit"
                     logger.warning(
-                        "[%s] Gemini 429 Rate Limit hit. Retrying in %.1fs (attempt %d/%d)...",
-                        self.name,
-                        wait_time,
-                        attempt,
-                        max_retries,
+                        "[%s] Gemini %s — retrying in %.0fs (attempt %d/%d)",
+                        self.name, reason, wait_time, attempt, max_retries,
                     )
                     time.sleep(wait_time)
                 else:
                     raise
             except Exception as e:
                 err_str = str(e)
-                if ("429" in err_str or "RESOURCE_EXHAUSTED" in err_str) and attempt < max_retries:
-                    wait_time = backoff_seconds * (2 ** (attempt - 1))
+                is_rate_limit   = "429" in err_str or "RESOURCE_EXHAUSTED" in err_str
+                is_server_error = "503" in err_str or "UNAVAILABLE" in err_str or "500" in err_str
+
+                if (is_rate_limit or is_server_error) and attempt < max_retries:
+                    base = 10.0 if is_server_error else 2.0
+                    wait_time = min(base * (2 ** (attempt - 1)), 60.0)
+                    reason = "503 Unavailable" if is_server_error else "Rate Limit"
                     logger.warning(
-                        "[%s] Gemini Rate Limit hit (%s). Retrying in %.1fs (attempt %d/%d)...",
-                        self.name,
-                        type(e).__name__,
-                        wait_time,
-                        attempt,
-                        max_retries,
+                        "[%s] Gemini %s (%s) — retrying in %.0fs (attempt %d/%d)",
+                        self.name, reason, type(e).__name__, wait_time, attempt, max_retries,
                     )
                     time.sleep(wait_time)
                 else:
