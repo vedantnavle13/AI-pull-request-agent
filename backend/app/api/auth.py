@@ -689,6 +689,47 @@ async def list_repositories(current_user: dict = Depends(get_current_user)):
     return {"repositories": repos}
 
 
+@router.post("/user/sync-repositories")
+async def sync_repositories(current_user: dict = Depends(get_current_user)):
+    """
+    Re-sync all repositories for all of the current user's GitHub App
+    installations directly from the GitHub API.
+
+    Any user can call this at any time to refresh their repo list after
+    adding or removing repos in GitHub App settings. This is idempotent.
+    """
+    installations = get_installations_for_user(user_id=current_user["id"])
+    total_synced = 0
+    errors = []
+
+    for inst in installations:
+        installation_id  = inst["installation_id"]
+        installation_uuid = inst["id"]
+        try:
+            synced = sync_installation_repositories(
+                installation_id=installation_id,
+                installation_uuid=installation_uuid,
+                upsert_repo_fn=upsert_repository,
+            )
+            total_synced += len(synced)
+            logger.info(
+                "[SyncRepos] Synced %d repos for installation_id=%d user=%s",
+                len(synced), installation_id, current_user["github_username"],
+            )
+        except Exception as exc:
+            logger.error(
+                "[SyncRepos] Failed to sync installation_id=%d: %s",
+                installation_id, exc,
+            )
+            errors.append({"installation_id": installation_id, "error": str(exc)})
+
+    return {
+        "synced": total_synced,
+        "installations": len(installations),
+        "errors": errors,
+    }
+
+
 @router.get("/user/reviews")
 async def list_user_reviews(
     repository: str | None = Query(None, description="Filter by owner/repo"),

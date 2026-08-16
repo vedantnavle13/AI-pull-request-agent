@@ -13,6 +13,7 @@ from app.database.repository import (
     get_installation_by_installation_id,
     upsert_repository,
     upsert_github_installation_orphan,
+    deactivate_repository,
 )
 from app.utils.logger import get_logger
 from app.api.metrics import router as metrics_router
@@ -157,15 +158,20 @@ async def webhook(request: Request):
         installation_id = payload.get("installation", {}).get("id")
         if not installation_id:
             return {"status": "ignored", "reason": "missing installation id"}
-            
-        logger.info("[Webhook] Received %s for installation_id=%s. Syncing repositories...", event_type, installation_id)
+
+        logger.info(
+            "[Webhook] %s action=%s installation_id=%s",
+            event_type, action, installation_id,
+        )
+
+        # Ensure the installation exists in our DB (create orphan if not)
         try:
-            # Look up the installation_uuid in our database
             installation = get_installation_by_installation_id(installation_id)
             if not installation:
-                # Race condition: webhook arrived before OAuth callback.
-                # Fetch installation info from GitHub and create orphan record.
-                logger.info("[Webhook] Installation %s not in DB — fetching from GitHub and creating orphan record", installation_id)
+                logger.info(
+                    "[Webhook] Installation %s not in DB — creating orphan record",
+                    installation_id,
+                )
                 inst_info = _fetch_installation_info(installation_id)
                 account = inst_info.get("account", {})
                 installation = upsert_github_installation_orphan(
@@ -174,19 +180,91 @@ async def webhook(request: Request):
                     account_login=account.get("login", ""),
                     account_type=account.get("type", "User"),
                 )
-                logger.info("[Webhook] Created orphan installation record: uuid=%s", installation["id"])
-            
-            installation_uuid = installation["id"]
-            synced = sync_installation_repositories(
-                installation_id=installation_id,
-                installation_uuid=installation_uuid,
-                upsert_repo_fn=upsert_repository,
-            )
-            logger.info("[Webhook] Synced %d repositories for installation_id=%s", len(synced), installation_id)
-            return {"status": "synced", "repositories_count": len(synced)}
+                logger.info(
+                    "[Webhook] Created orphan installation uuid=%s",
+                    installation["id"],
+                )
         except Exception as e:
-            logger.error("[Webhook] Failed to sync repositories for installation_id=%s: %s", installation_id, e)
+            logger.error("[Webhook] Failed to resolve installation %s: %s", installation_id, e)
             return {"status": "error", "reason": str(e)}
+
+        installation_uuid = installation["id"]
+
+        if event_type == "installation_repositories":
+            # GitHub sends the exact repos added/removed in the payload —
+            # use that directly instead of a full API re-sync.
+            repos_added   = payload.get("repositories_added", [])
+            repos_removed = payload.get("repositories_removed", [])
+
+            added_count   = 0
+            removed_count = 0
+
+            for repo in repos_added:
+                try:
+                    upsert_repository(
+                        installation_uuid=installation_uuid,
+                        github_repo_id=repo["id"],
+                        owner=repo["full_name"].split("/")[0],
+                        name=repo["name"],
+                        full_name=repo["full_name"],
+                        private=repo.get("private", False),
+                        default_branch=repo.get("default_branch", "main"),
+                    )
+                    added_count += 1
+                    logger.info("[Webhook] Added repo: %s", repo["full_name"])
+                except Exception as e:
+                    logger.error("[Webhook] Failed to add repo %s: %s", repo.get("full_name"), e)
+
+            for repo in repos_removed:
+                try:
+                    deactivate_repository(
+                        installation_uuid=installation_uuid,
+                        github_repo_id=repo["id"],
+                    )
+                    removed_count += 1
+                    logger.info("[Webhook] Removed repo: %s", repo["full_name"])
+                except Exception as e:
+                    logger.error("[Webhook] Failed to remove repo %s: %s", repo.get("full_name"), e)
+
+            return {
+                "status": "synced",
+                "added": added_count,
+                "removed": removed_count,
+            }
+
+        else:  # event_type == "installation" (full install / uninstall / suspend)
+            if action == "deleted" or action == "suspend":
+                # Deactivate all repos for this installation
+                try:
+                    conn = get_connection()
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "UPDATE repositories SET active=FALSE, updated_at=NOW() "
+                            "WHERE installation_id=%s",
+                            (installation_uuid,),
+                        )
+                    conn.commit()
+                    conn.close()
+                    logger.info("[Webhook] Deactivated all repos for installation %s", installation_id)
+                except Exception as e:
+                    logger.error("[Webhook] Failed to deactivate repos: %s", e)
+                return {"status": "deactivated"}
+
+            # For new installs or unsuspend, do a full sync via GitHub API
+            try:
+                synced = sync_installation_repositories(
+                    installation_id=installation_id,
+                    installation_uuid=installation_uuid,
+                    upsert_repo_fn=upsert_repository,
+                )
+                logger.info(
+                    "[Webhook] Full sync: %d repos for installation_id=%s",
+                    len(synced), installation_id,
+                )
+                return {"status": "synced", "repositories_count": len(synced)}
+            except Exception as e:
+                logger.error("[Webhook] Full sync failed for installation %s: %s", installation_id, e)
+                return {"status": "error", "reason": str(e)}
 
     # 7. Only process pull_request beyond this point
     if event_type != "pull_request":

@@ -1858,6 +1858,33 @@ def upsert_repository(
         conn.close()
 
 
+def deactivate_repository(installation_uuid: str, github_repo_id: int) -> None:
+    """
+    Mark a repository as inactive (active=FALSE).
+
+    Called when GitHub fires installation_repositories with action=removed,
+    meaning the user revoked the GitHub App's access to that repo.
+
+    Idempotent: safe to call even if the repo is already inactive or missing.
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE repositories
+                SET    active     = FALSE,
+                       updated_at = NOW()
+                WHERE  installation_id = %s
+                  AND  github_repo_id  = %s
+                """,
+                (installation_uuid, github_repo_id),
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def get_repositories_for_installation(installation_uuid: str) -> list[dict]:
     """Return all active repositories for a given installation UUID."""
     conn = get_connection()
