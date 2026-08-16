@@ -1749,6 +1749,39 @@ def get_installations_for_user(user_id: str) -> list[dict]:
         conn.close()
 
 
+def claim_orphan_installations_for_user(user_id: str, github_username: str) -> list[int]:
+    """
+    Find any github_installations rows where account_login matches the user's
+    GitHub username but user_id is NULL (orphan) or belongs to a different user,
+    then claim them by setting user_id to the given user_id.
+
+    Called at login time to recover installations that were saved before the user
+    completed OAuth (e.g. installed the app before logging in, or the OAuth
+    callback crashed during a prior session).
+
+    Returns a list of numeric installation_ids that were claimed.
+    """
+    conn = get_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                UPDATE github_installations
+                SET    user_id    = %s,
+                       updated_at = NOW()
+                WHERE  LOWER(account_login) = LOWER(%s)
+                  AND  (user_id IS NULL OR user_id != %s)
+                RETURNING installation_id
+                """,
+                (user_id, github_username, user_id),
+            )
+            rows = cur.fetchall()
+        conn.commit()
+        return [r[0] for r in rows]
+    finally:
+        conn.close()
+
+
 def get_user_id_for_installation(installation_id: int) -> str | None:
     """
     Given a numeric GitHub installation_id, return the associated user_id UUID.

@@ -64,6 +64,7 @@ from app.database.repository import (
     get_repositories_for_user,
     get_reviews_for_user,
     upsert_repository,
+    claim_orphan_installations_for_user,
 )
 from app.utils.tokens import create_session_token
 from app.api.dependencies import get_current_user
@@ -330,7 +331,39 @@ async def github_callback(
         user["github_username"], user["github_user_id"], user["id"],
     )
 
-    # 7. Handle pending installation from state or query params
+    # 7a. Auto-claim any orphaned installations for this GitHub account.
+    #     This recovers installations saved before OAuth completed (e.g., the
+    #     user installed the app before ever logging in, or a prior callback
+    #     crashed). We do this on every login — it is idempotent and cheap.
+    try:
+        claimed = claim_orphan_installations_for_user(
+            user_id=user["id"],
+            github_username=user["github_username"],
+        )
+        if claimed:
+            logger.info(
+                "[Auth] Claimed %d orphaned installation(s) for user %s: %s",
+                len(claimed), user["github_username"], claimed,
+            )
+            # Sync repositories for each newly claimed installation
+            for inst_id in claimed:
+                try:
+                    inst = get_installation_by_installation_id(inst_id)
+                    if inst:
+                        sync_installation_repositories(
+                            installation_id=inst_id,
+                            installation_uuid=inst["id"],
+                            upsert_repo_fn=upsert_repository,
+                        )
+                except Exception as sync_exc:
+                    logger.warning(
+                        "[Auth] Failed to sync repos for claimed installation %d: %s",
+                        inst_id, sync_exc,
+                    )
+    except Exception as claim_exc:
+        logger.warning("[Auth] Orphan installation claim failed (non-fatal): %s", claim_exc)
+
+    # 7b. Handle pending installation from state or query params
     pending_installation_id = state_data.get("pending_installation_id") or installation_id
     if pending_installation_id:
         await _associate_installation(
