@@ -1,316 +1,121 @@
-# AI Pull Request Review Agent
+# 🤖 AI Pull Request Agent
 
-An AI-powered GitHub Pull Request review agent that automatically analyzes PR changes using Google Gemini, produces structured findings, evaluates them with a policy engine, and posts the review back to GitHub.
+An automated, multi-agent AI system that reviews GitHub Pull Requests using Google's Gemini API and LangGraph. Built as a multi-user SaaS GitHub App, it provides instant, high-quality code reviews directly as PR comments.
 
-> **Current status:** Working MVP  
-> The current system can receive GitHub PR webhooks, fetch changed files, review the diff with Gemini, make a policy decision, and post an approval/review back to the PR.
+## ✨ Features
 
-## Current Architecture
+- **Automated PR Reviews**: Instantly reviews new PRs and subsequent commits.
+- **Multi-Agent Orchestration**: Uses LangGraph to coordinate specialized AI agents:
+  - 🛡️ **Security Agent**: Scans for vulnerabilities, hardcoded secrets, and injection flaws.
+  - 💎 **Quality Agent**: Reviews logic, edge cases, and architectural patterns.
+  - 🎨 **Style Agent**: Ensures consistent formatting and adherence to best practices.
+  - 📚 **Docs Agent**: Checks for adequate documentation and docstrings.
+- **Multi-User SaaS Architecture**: Securely handles multiple user accounts and GitHub App installations.
+- **Robust Background Processing**: Uses ARQ and Redis for reliable asynchronous job processing, complete with rate-limit handling and exponential backoff for the Gemini API.
+- **Modern Dashboard**: A React frontend to manage connected repositories and monitor system health.
 
-```text
-GitHub Pull Request
-        |
-        v
-GitHub App Webhook
-        |
-        v
-FastAPI /webhook
-        |
-        +--> HMAC-SHA256 signature validation
-        |
-        +--> Webhook delivery idempotency
-        |
-        v
-GitHub API
-        |
-        v
-PR changed files / patches
-        |
-        v
-Gemini
-        |
-        v
-Structured ReviewResult
-        |
-        v
-Policy Engine
-        |
-        +--> BLOCK
-        +--> HUMAN_REVIEW
-        +--> APPROVE
-        |
-        v
-GitHub Pull Request Review
+## 🏗️ Architecture & Tech Stack
+
+### Backend
+- **Framework**: FastAPI (Python)
+- **Database**: PostgreSQL (Raw SQL via `psycopg`, no ORM)
+- **Task Queue**: Redis + ARQ (Async Redis Queue)
+- **AI/LLM Engine**: Google GenAI SDK (`gemini-3.6-flash`)
+- **Orchestration**: LangGraph (StateGraph)
+- **GitHub Integration**: PyGithub & Webhooks
+
+### Frontend
+- **Framework**: React + Vite
+- **Styling**: Vanilla CSS with a modern dark theme
+- **Routing**: React Router DOM
+- **Authentication**: Stateless JWT
+
+## 🚀 Getting Started
+
+### Prerequisites
+- Python 3.10+
+- Node.js 18+
+- PostgreSQL
+- Redis
+- A Google Gemini API Key
+- A GitHub App configured with webhooks and private key.
+
+### 1. Environment Setup
+Create a `.env` file in the `backend/` directory:
+```env
+APP_NAME="AI Pull Request Agent"
+DEBUG=True
+HOST=0.0.0.0
+PORT=8000
+
+# GitHub App Settings
+GITHUB_APP_ID=your_app_id
+GITHUB_CLIENT_ID=your_client_id
+GITHUB_CLIENT_SECRET=your_client_secret
+GITHUB_WEBHOOK_SECRET=your_webhook_secret
+GITHUB_PRIVATE_KEY_PATH=private-key.pem
+
+# AI Settings
+GEMINI_API_KEY=your_gemini_api_key
+GEMINI_MODEL=gemini-3.6-flash
+
+# Database & Queue
+DATABASE_URL=postgresql://user:password@localhost:5432/pr_agent
+REDIS_URL=redis://localhost:6379/0
 ```
 
-## What Has Been Implemented
-
-### GitHub integration
-
-- GitHub App created and connected to the test repository.
-- GitHub webhook receives Pull Request events.
-- GitHub App installation authentication is implemented.
-- PR changed files are fetched through the GitHub API.
-- AI reviews are posted back to the GitHub PR.
-
-### AI review
-
-The reviewer uses **Google Gemini**, not OpenAI.
-
-The model is prompted to look for:
-
-- Bugs
-- Security vulnerabilities
-- Performance problems
-- Serious code-quality problems
-
-The reviewer returns structured Pydantic models rather than relying on free-form text.
-
-Example finding:
-
-```json
-{
-  "severity": "HIGH",
-  "category": "SECURITY",
-  "file": "auth.py",
-  "line": 3,
-  "title": "SQL Injection Vulnerability",
-  "description": "User input is directly concatenated into the SQL query.",
-  "suggestion": "Use parameterized queries."
-}
-```
-
-### Policy engine
-
-The current policy maps findings to:
-
-| Decision | Condition | GitHub action |
-|---|---|---|
-| `BLOCK` | HIGH or CRITICAL finding | Request changes |
-| `HUMAN_REVIEW` | Other findings | Comment |
-| `APPROVE` | No findings | Approve |
-
-The approval path has been tested successfully on a clean PR.
-
-## Project Structure
-
-```text
-AI-pull-request-agent/
-├── backend/
-│   ├── app/
-│   │   ├── agents/
-│   │   │   ├── reviewer.py
-│   │   │   └── test_gemini.py
-│   │   ├── api/
-│   │   ├── database/
-│   │   ├── github/
-│   │   │   ├── auth.py
-│   │   │   ├── client.py
-│   │   │   ├── diff.py
-│   │   │   └── validator.py
-│   │   ├── models/
-│   │   │   └── findings.py
-│   │   ├── services/
-│   │   │   ├── idempotency.py
-│   │   │   ├── policy.py
-│   │   │   └── review_service.py
-│   │   ├── config.py
-│   │   └── main.py
-│   ├── .env
-│   ├── private-key.pem
-│   └── requirements.txt
-├── frontend/
-├── docker-compose.yml
-├── .gitignore
-└── README.md
-```
-
-## Local Setup
-
-### 1. Clone the repository
-
-```bash
-git clone <your-repository-url>
-cd AI-pull-request-agent
-```
-
-### 2. Create and activate the virtual environment
-
-```bash
-python3 -m venv venv
-source venv/bin/activate
-```
-
-### 3. Install backend dependencies
-
+### 2. Backend Installation
 ```bash
 cd backend
+python -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 4. Configure environment variables
-
-Create:
-
-```text
-backend/.env
-```
-
-Example:
-
-```env
-GEMINI_API_KEY=your_gemini_api_key
-
-GITHUB_APP_ID=your_github_app_id
-GITHUB_WEBHOOK_SECRET=your_webhook_secret
-```
-
-Your GitHub App private key should remain local and must never be committed.
-
-## Run the Backend
-
-From the `backend` directory:
-
+### 3. Frontend Installation
 ```bash
-uvicorn app.main:app --reload
+cd frontend
+npm install
 ```
 
-The API will normally be available at:
+## ⚙️ Running the Application
 
-```text
-http://localhost:8000
-```
+You need to run three separate processes:
 
-The webhook endpoint is:
-
-```text
-POST /webhook
-```
-
-Opening `/webhook` directly in a browser sends a GET request, so a `405 Method Not Allowed` response is expected.
-
-## Exposing the Webhook Locally
-
-GitHub cannot reach `localhost` directly.
-
-Use ngrok:
-
+**1. The FastAPI Backend Server:**
+Handles API requests and GitHub webhooks.
 ```bash
-ngrok http 8000
+cd backend
+source venv/bin/activate
+uvicorn app.main:app --reload --port 8000
 ```
 
-Then configure the GitHub App webhook URL as:
-
-```text
-https://<ngrok-domain>/webhook
+**2. The ARQ Background Worker:**
+Consumes jobs from Redis and executes the LangGraph AI agents.
+```bash
+cd backend
+source venv/bin/activate
+arq app.workers.review_worker.WorkerSettings
 ```
 
-## Security
-
-The webhook validates GitHub's `X-Hub-Signature-256` using HMAC-SHA256 before processing the payload.
-
-Secrets that must stay out of Git:
-
-- Gemini API key
-- GitHub webhook secret
-- GitHub App private key
-- Any access tokens
-
-Make sure `.env` and `private-key.pem` are included in `.gitignore`.
-
-## Current Limitations
-
-This is an MVP and is intentionally not yet production-ready.
-
-Current limitations include:
-
-- Webhook idempotency is currently based on the GitHub delivery ID and is stored in memory.
-- Multiple different GitHub events for the same PR can still result in multiple reviews.
-- The review currently operates on the PR file patches rather than sophisticated line-level diff mapping.
-- AI approval is based on the current policy engine and should not yet be treated as a complete production security gate.
-- Processing is currently synchronous inside the webhook request.
-- PostgreSQL, Redis/ARQ, LangGraph, multi-agent review, observability, and the dashboard are not yet integrated.
-
-## Planned Roadmap
-
-### Phase 1 — Reliability
-
-- Filter webhook events/actions.
-- Use PR number + repository + HEAD commit as review idempotency key.
-- Move idempotency state to PostgreSQL.
-- Move review processing to Redis + ARQ workers.
-
-### Phase 2 — Multi-Agent Review
-
-Introduce LangGraph with specialist agents:
-
-```text
-PR Diff
-   |
-   v
-Orchestrator
-   |
-   +--> Security Agent
-   +--> Quality Agent
-   +--> Test Agent
-   +--> Documentation Agent
-   |
-   v
-Aggregator
-   |
-   v
-Policy Engine
+**3. The React Frontend:**
+Serves the user dashboard.
+```bash
+cd frontend
+npm run dev
 ```
 
-### Phase 3 — Better GitHub Reviews
+## 🧠 How it Works
 
-- Inline comments on exact changed lines.
-- Better diff/line mapping.
-- Improved review summaries.
+1. **Installation**: A user logs into the dashboard via GitHub OAuth and installs the GitHub App on their repositories.
+2. **Webhook**: When a developer opens or updates a Pull Request, GitHub sends a webhook to the FastAPI backend.
+3. **Queue**: The backend validates the webhook and queues a review job in Redis.
+4. **Execution**: The ARQ worker picks up the job, fetches the PR diff, and delegates it to the LangGraph orchestrator.
+5. **AI Review**: Specialized Gemini agents review the code in parallel.
+6. **Delivery**: The worker formats the agents' findings into a beautiful markdown comment and posts it directly back to the GitHub PR.
 
-### Phase 4 — Observability
+## 🛠️ Customization
+To change the AI model, update `GEMINI_MODEL` in your `.env`. The system handles API rate limits (`429`) and server overloads (`503`) automatically using exponential backoff with jitter.
 
-- Review history
-- Agent execution events
-- Latency tracking
-- Token/cost tracking
-- Audit trail
-
-### Phase 5 — Dashboard
-
-Build the planned Next.js dashboard for:
-
-- PR reviews
-- Findings
-- Human-in-the-loop queue
-- Review history
-- Agent performance
-- Cost and latency metrics
-
-### Phase 6 — Automatic Merge
-
-Only after the review and policy system is reliable:
-
-```text
-PR
- |
- +--> Tests pass
- +--> Security checks pass
- +--> No blocking AI findings
- +--> Repository policy satisfied
- +--> Required approvals satisfied
- |
- v
-Automatic merge
-```
-
-## Development Philosophy
-
-The project is being built incrementally:
-
-1. Make one end-to-end path work.
-2. Verify it against a real GitHub PR.
-3. Add reliability.
-4. Add architectural complexity only when it solves a real problem.
-
-The current working milestone is the **single-agent GitHub PR review + policy decision MVP**.
+## 📄 License
+This project is proprietary.
